@@ -325,7 +325,7 @@
     const name = prompt("نام نمایشی جدید:", cur);
     if (name === null || !name.trim()) return;
     const { error } = await sbMain.from("profiles").update({display_name: name.trim()}).eq("id", currentUser.uid);
-    if (error) toast("ذخیره نشد: " + error.message); else toast("نام نمایشی به‌روزرسانی شد");
+    if (error) toast("ذخیره نشد: " + error.message); else { toast("نام نمایشی به‌روزرسانی شد"); refetchUsers(); }
   }
 
   function renderUserBox(){
@@ -374,26 +374,31 @@
     const { data, error } = await sbMain.from("boards").insert({ name: name.trim(), market:false, allowed_uids: [], order_num: Date.now() }).select().single();
     if (error){ alert("ذخیره نشد: " + error.message); return; }
     activeTab = data.id;
+    refetchBoards();
   }
   async function renameBoard(b){
     const name = prompt("نام جدید شرکت:", b.name);
     if (!name || !name.trim()) return;
-    await sbMain.from("boards").update({name: name.trim()}).eq("id", b.id);
+    const { error } = await sbMain.from("boards").update({name: name.trim()}).eq("id", b.id);
+    if (error) toast("ذخیره نشد: " + error.message); else refetchBoards();
   }
   async function archiveBoard(b){
     if (!confirm('تخته "'+b.name+'" از لیست تب‌ها حذف شود؟ (تسک‌های ثبت‌شده باقی می‌مانند)')) return;
-    await sbMain.from("boards").update({archived:true}).eq("id", b.id);
+    const { error } = await sbMain.from("boards").update({archived:true}).eq("id", b.id);
+    if (error){ toast("حذف نشد: " + error.message); return; }
     if (activeTab === b.id) activeTab = null;
+    refetchBoards();
   }
 
   // ---------- Render ----------
+  let uiBusy = false;
   function isTypingActive(){
     const a = document.activeElement;
     return !!(a && contentEl.contains(a) && (a.tagName === "TEXTAREA" || a.tagName === "INPUT"));
   }
   function render(){
     if (!currentUser){ return; }
-    if (isTypingActive()) return; // don't rebuild the DOM mid-typing, or in-progress text is lost
+    if (isTypingActive() || uiBusy) return; // don't rebuild the DOM mid-typing or mid-action, or in-progress work is lost
     renderTabs();
     contentEl.innerHTML = "";
     document.getElementById("toolbar").style.display = dbReady ? "flex" : "none";
@@ -495,13 +500,19 @@
     }, data);
     const { error } = await sbMain.from("tasks").insert(row);
     if (error) alert("ذخیره نشد: " + error.message);
+    else refetchTasks(boardId);
   }
   async function updateTask(boardId, taskId, data){
     if (data.due !== undefined) data = Object.assign({}, data, {due: normDue(data.due)});
     const { error } = await sbMain.from("tasks").update(data).eq("id", taskId);
     if (error) toast("ذخیره نشد: " + error.message);
+    else refetchTasks(boardId);
   }
-  async function deleteTask(boardId, taskId){ await sbMain.from("tasks").delete().eq("id", taskId); }
+  async function deleteTask(boardId, taskId){
+    const { error } = await sbMain.from("tasks").delete().eq("id", taskId);
+    if (error) toast("حذف نشد: " + error.message);
+    else refetchTasks(boardId);
+  }
 
   function requestTransfer(board, t){
     const members = board.market ? allUsers.map(u=>u.id) : (board.allowed_uids||[]);
@@ -646,7 +657,7 @@
       tr.appendChild(el("td", {class:"datecell"}, [r.date || ""]));
       WEEKLY_FIELDS.forEach(f => {
         const ta = el("textarea", {rows:"1"}); ta.value = r[f.key] || "";
-        let timer; ta.addEventListener("input", ()=>{ clearTimeout(timer); timer=setTimeout(()=>{ sbMain.from("weekly").update({[f.key]: ta.value}).eq("id", r.id); },500); });
+        let timer; ta.addEventListener("input", ()=>{ clearTimeout(timer); timer=setTimeout(async ()=>{ await sbMain.from("weekly").update({[f.key]: ta.value}).eq("id", r.id); refetchWeekly(); },500); });
         tr.appendChild(el("td", null, [ta]));
       });
       const del = el("button", {class:"icon-btn", title:"حذف این هفته", onclick: async ()=>{
@@ -665,7 +676,7 @@
     const row = { date: dateStr, date_sort: today.getTime() };
     WEEKLY_FIELDS.forEach(f => row[f.key] = "");
     const { error } = await sbMain.from("weekly").insert(row);
-    if (error) alert("ذخیره نشد: " + error.message);
+    if (error) alert("ذخیره نشد: " + error.message); else refetchWeekly();
   }
 
   // ---------- Admin ----------
@@ -679,13 +690,14 @@
   async function toggleUserBoard(board, uid){
     const cur = new Set(board.allowed_uids||[]);
     if (cur.has(uid)) cur.delete(uid); else cur.add(uid);
-    await sbMain.from("boards").update({allowed_uids: Array.from(cur)}).eq("id", board.id);
+    const { error } = await sbMain.from("boards").update({allowed_uids: Array.from(cur)}).eq("id", board.id);
+    if (error) toast("ذخیره نشد: " + error.message); else refetchBoards();
   }
   async function toggleAdminRole(u){
     if (u.role === "superadmin") return;
     if (!confirm((u.role==="admin" ? "سلب" : "اعطای") + " نقش ادمین برای " + (u.display_name||u.email) + "؟")) return;
     const { error } = await sbMain.from("profiles").update({role: u.role==="admin" ? "member" : "admin"}).eq("id", u.id);
-    if (error) toast("انجام نشد: " + error.message);
+    if (error) toast("انجام نشد: " + error.message); else refetchUsers();
   }
   async function sendPasswordReset(u){
     if (!confirm("ایمیل بازنشانی رمز برای " + u.email + " ارسال شود؟")) return;
@@ -696,15 +708,19 @@
     const name = prompt("نام نمایشی جدید برای " + u.email + ":", u.display_name || "");
     if (name === null || !name.trim()) return;
     const { error } = await sbMain.from("profiles").update({display_name: name.trim()}).eq("id", u.id);
-    if (error) toast("ذخیره نشد: " + error.message); else toast("نام نمایشی به‌روزرسانی شد");
+    if (error) toast("ذخیره نشد: " + error.message); else { toast("نام نمایشی به‌روزرسانی شد"); refetchUsers(); }
   }
   async function createUser(email, password, displayName){
     const client2 = getSecondaryClient();
     const { data, error } = await client2.auth.signUp({ email, password });
     if (error) throw error;
+    if (!data || !data.user) throw new Error("ثبت‌نام ناموفق بود — احتمالاً این ایمیل قبلاً ثبت شده است");
+    if (Array.isArray(data.user.identities) && data.user.identities.length === 0){
+      throw new Error("این ایمیل قبلاً در سیستم ثبت شده — از «ارسال ایمیل بازنشانی رمز» برای همان کاربر استفاده کن");
+    }
     const uid = data.user.id;
     try{ await client2.auth.signOut(); }catch(e){}
-    const { error: err2 } = await sbMain.from("profiles").insert({ id: uid, email, role:"member", display_name: displayName || email.split("@")[0] });
+    const { error: err2 } = await sbMain.from("profiles").upsert({ id: uid, email, role:"member", display_name: displayName || email.split("@")[0] }, {onConflict:"id", ignoreDuplicates:true});
     if (err2) throw err2;
     return uid;
   }
@@ -718,10 +734,18 @@
     const addBtn = el("button", {class:"btn", onclick: async ()=>{
       const email = emailIn.value.trim(), pass = passIn.value;
       if (!email || pass.length < 6){ toast("ایمیل معتبر و رمز حداقل ۶ کاراکتری لازم است"); return; }
-      addBtn.disabled = true;
-      try{ await createUser(email, pass, nameIn.value.trim()); toast("کاربر ساخته شد"); emailIn.value=""; passIn.value=""; nameIn.value=""; }
-      catch(e){ toast("ساخت کاربر ناموفق بود: " + (e && e.message || e)); }
-      addBtn.disabled = false;
+      addBtn.disabled = true; uiBusy = true;
+      try{
+        await createUser(email, pass, nameIn.value.trim());
+        toast("کاربر ساخته شد");
+        emailIn.value=""; passIn.value=""; nameIn.value="";
+      }
+      catch(e){
+        console.error("createUser failed:", e);
+        toast("ساخت کاربر ناموفق بود: " + (e && e.message || e));
+      }
+      addBtn.disabled = false; uiBusy = false;
+      await refetchUsers();
     }}, ["افزودن کاربر"]);
     panel.appendChild(el("div", {class:"add-form"}, [emailIn, passIn, nameIn, addBtn]));
 
