@@ -644,7 +644,11 @@
         let timer; ta.addEventListener("input", ()=>{ clearTimeout(timer); timer=setTimeout(()=>{ sbMain.from("weekly").update({[f.key]: ta.value}).eq("id", r.id); },500); });
         tr.appendChild(el("td", null, [ta]));
       });
-      const del = el("button", {class:"icon-btn", title:"حذف این هفته", onclick: ()=>{ if (confirm("ردیف این هفته حذف شود؟")) sbMain.from("weekly").delete().eq("id", r.id); }}, ["✕"]);
+      const del = el("button", {class:"icon-btn", title:"حذف این هفته", onclick: async ()=>{
+        if (!confirm("ردیف این هفته حذف شود؟")) return;
+        const { error } = await sbMain.from("weekly").delete().eq("id", r.id);
+        if (error) toast("حذف نشد: " + error.message); else refetchWeekly();
+      }}, ["✕"]);
       tr.appendChild(el("td", null, [del]));
       table.appendChild(tr);
     });
