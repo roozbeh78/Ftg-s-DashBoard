@@ -387,8 +387,13 @@
   }
 
   // ---------- Render ----------
+  function isTypingActive(){
+    const a = document.activeElement;
+    return !!(a && contentEl.contains(a) && (a.tagName === "TEXTAREA" || a.tagName === "INPUT"));
+  }
   function render(){
     if (!currentUser){ return; }
+    if (isTypingActive()) return; // don't rebuild the DOM mid-typing, or in-progress text is lost
     renderTabs();
     contentEl.innerHTML = "";
     document.getElementById("toolbar").style.display = dbReady ? "flex" : "none";
@@ -933,6 +938,7 @@
   }
 
   function wireToolbar(){
+    contentEl.addEventListener("focusout", ()=>{ setTimeout(()=>{ if (!isTypingActive()) render(); }, 60); });
     document.getElementById("reportBtn").addEventListener("click", showReportModal);
     document.getElementById("exportBtn").addEventListener("click", exportBackup);
     document.getElementById("importBtn").addEventListener("click", ()=> document.getElementById("importFile").click());
