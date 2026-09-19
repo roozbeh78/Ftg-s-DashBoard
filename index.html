@@ -399,6 +399,7 @@
   function render(){
     if (!currentUser){ return; }
     if (isTypingActive() || uiBusy) return; // don't rebuild the DOM mid-typing or mid-action, or in-progress work is lost
+    if (activeTab){ try{ localStorage.setItem("opshub_active_tab", activeTab); }catch(e){} }
     renderTabs();
     contentEl.innerHTML = "";
     document.getElementById("toolbar").style.display = dbReady ? "flex" : "none";
@@ -742,7 +743,8 @@
       }
       catch(e){
         console.error("createUser failed:", e);
-        toast("ساخت کاربر ناموفق بود: " + (e && e.message || e));
+        const detail = [e && e.message, e && e.code, e && e.details, e && e.hint].filter(Boolean).join(" | ");
+        alert("ساخت کاربر ناموفق بود:\n" + (detail || String(e)));
       }
       addBtn.disabled = false; uiBusy = false;
       await refetchUsers();
@@ -925,8 +927,14 @@
     boards.forEach(b => { if (!subscribedBoardIds.has(b.id)) subscribeTasks(b.id); });
     if (activeTab === null){
       const mine = myAccessibleBoards();
-      const first = mine.find(b => !b.market) || mine.find(b=>b.market);
-      if (first) activeTab = first.id;
+      let saved = null;
+      try{ saved = localStorage.getItem("opshub_active_tab") || null; }catch(e){}
+      if (saved && (saved === "weekly" || saved === "admin" || mine.some(b => b.id === saved))){
+        activeTab = saved;
+      } else {
+        const first = mine.find(b => !b.market) || mine.find(b=>b.market);
+        if (first) activeTab = first.id;
+      }
     }
     dbReady = true;
     render();
