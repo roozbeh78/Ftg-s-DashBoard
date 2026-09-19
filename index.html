@@ -920,6 +920,10 @@
     if (!data){ await sbMain.from("boards").insert({ name:"فضای اشتراک", market:true, allowed_uids: [], order_num:0 }); }
   }
 
+  function channelExists(name){
+    try{ return sbMain.getChannels().some(c => c.topic === "realtime:"+name); }catch(e){ return false; }
+  }
+
   async function refetchUsers(){
     const { data, error } = await sbMain.from("profiles").select("*");
     if (error) return;
@@ -930,6 +934,7 @@
   }
   function subscribeUsers(){
     refetchUsers();
+    if (channelExists("profiles-all")) return;
     sbMain.channel("profiles-all").on("postgres_changes", {event:"*", schema:"public", table:"profiles"}, refetchUsers).subscribe();
   }
 
@@ -954,6 +959,7 @@
   }
   function subscribeBoards(){
     refetchBoards();
+    if (channelExists("boards-all")) return;
     sbMain.channel("boards-all").on("postgres_changes", {event:"*", schema:"public", table:"boards"}, refetchBoards).subscribe();
   }
 
@@ -966,6 +972,7 @@
   function subscribeTasks(boardId){
     subscribedBoardIds.add(boardId);
     refetchTasks(boardId);
+    if (channelExists("tasks-"+boardId)) return;
     sbMain.channel("tasks-"+boardId).on("postgres_changes", {event:"*", schema:"public", table:"tasks", filter:"board_id=eq."+boardId}, ()=>refetchTasks(boardId)).subscribe();
   }
 
@@ -979,6 +986,7 @@
   function subscribeWeekly(){
     if (!isAdmin()) return;
     refetchWeekly();
+    if (channelExists("weekly-all")) return;
     sbMain.channel("weekly-all").on("postgres_changes", {event:"*", schema:"public", table:"weekly"}, refetchWeekly).subscribe();
   }
 
@@ -998,7 +1006,6 @@
     loginScreenEl.innerHTML = "";
     showBanner(null);
     try{ await ensureProfile(); } catch(e){ showBanner("خطا در بارگذاری پروفایل کاربر: " + (e && e.message || e)); return; }
-    started = true;
     subscribeUsers();
     await ensureMarketBoard().catch(()=>{});
     subscribeBoards();
@@ -1032,7 +1039,7 @@
       const user = session && session.user;
       if (user){
         currentUser = { uid:user.id, email:user.email };
-        if (!started) startAfterAuth();
+        if (!started){ started = true; startAfterAuth(); }
       } else {
         resetState();
         renderLogin();
