@@ -1010,26 +1010,12 @@
     await ensureMarketBoard().catch(()=>{});
     subscribeBoards();
     subscribeWeekly();
-    startPolling();
   }
-
-  let pollTimer = null;
-  function startPolling(){
-    stopPolling();
-    pollTimer = setInterval(()=>{
-      refetchUsers();
-      refetchBoards();
-      if (isAdmin()) refetchWeekly();
-      subscribedBoardIds.forEach(id => refetchTasks(id));
-    }, 8000);
-  }
-  function stopPolling(){ if (pollTimer){ clearInterval(pollTimer); pollTimer = null; } }
 
   function resetState(){
     currentUser = null; currentUserDoc = null; dbReady = false; started = false;
     boards = []; tasksByBoard = {}; weeklyRows = []; allUsers = []; activeTab = null; subscribedBoardIds = new Set();
     sbMain.removeAllChannels();
-    stopPolling();
   }
 
   async function boot(){
