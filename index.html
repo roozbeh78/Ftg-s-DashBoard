@@ -240,7 +240,7 @@
     </div>
   </div>
 
-  <footer>هر تغییری همین‌جا برای همه‌ی اعضا ذخیره و همگام می‌شود.<br><span style="opacity:.5;">نسخه: BUILD-2026-09-19-5-activity</span></footer>
+  <footer>هر تغییری همین‌جا برای همه‌ی اعضا ذخیره و همگام می‌شود.<br><span style="opacity:.5;">نسخه: BUILD-2026-09-19-6-superadmin-allspaces</span></footer>
 </div>
 <div class="toast" id="toast"></div>
 
@@ -513,13 +513,27 @@
     refetchBoards();
   }
 
+  const ALL_SCOPE = "__all__";
+
+  // The super admin always has an implicit personal space in every company —
+  // no need to add them to allowed_uids by hand.
+  function effectiveMembers(board){
+    if (board.market) return [];
+    const base = board.allowed_uids || [];
+    if (isSuperAdmin() && !base.includes(state.currentUser.uid)) return [state.currentUser.uid, ...base];
+    return base;
+  }
+
   function ownerScopeFor(board){
     if (board.market) return null;
     if (!isAdmin()) return state.currentUser.uid;
-    const members = board.allowed_uids || [];
+    const members = effectiveMembers(board);
     if (!members.length) return null;
-    if (!state.subUserByBoard[board.id] || !members.includes(state.subUserByBoard[board.id])){
-      state.subUserByBoard[board.id] = members[0];
+    const cur = state.subUserByBoard[board.id];
+    const stillValid = cur === ALL_SCOPE || members.includes(cur);
+    if (!stillValid){
+      // Default to my own space first, not whichever member happens to be first.
+      state.subUserByBoard[board.id] = members.includes(state.currentUser.uid) ? state.currentUser.uid : members[0];
     }
     return state.subUserByBoard[board.id];
   }
@@ -543,8 +557,9 @@
     panel.appendChild(el("div", {class:"board-head"}, [ el("h2", null, [board.name]), el("div", {class:"actions"}, headActions) ]));
 
     const ownerUid = ownerScopeFor(board);
+    const isAllMode = !board.market && ownerUid === ALL_SCOPE;
     if (!board.market && isAdmin()){
-      const members = board.allowed_uids || [];
+      const members = effectiveMembers(board);
       if (!members.length){
         panel.appendChild(el("p", {class:"hint"}, ["هنوز هیچ کاربری به این شرکت دسترسی ندارد — از تب «کاربران» دسترسی بده."]));
         return panel;
@@ -553,15 +568,20 @@
       members.forEach(uid => {
         subTabs.appendChild(el("button", {class:"btn small "+(ownerUid===uid?"":"secondary"), onclick:()=>{ state.subUserByBoard[board.id]=uid; render(); }}, [userLabel(uid)]));
       });
-      panel.appendChild(el("p", {class:"hint"}, ["فضای هر کاربر داخل این شرکت جدا و خصوصی است — این نمای «فضای " + userLabel(ownerUid) + "» است."]));
+      subTabs.appendChild(el("button", {class:"btn small "+(isAllMode?"":"secondary"), onclick:()=>{ state.subUserByBoard[board.id]=ALL_SCOPE; render(); }}, ["📊 همه (داشبورد)"]));
+      panel.appendChild(el("p", {class:"hint"}, [
+        isAllMode ? "این نمای همه‌ی فضاهای شخصی این شرکت با هم است." : "فضای هر کاربر داخل این شرکت جدا و خصوصی است — این نمای «فضای " + userLabel(ownerUid) + "» است."
+      ]));
       panel.appendChild(subTabs);
     }
 
-    panel.appendChild(renderAddForm(board, ownerUid));
+    const showOwner = board.market || isAllMode;
+    const addFormOwner = isAllMode ? state.currentUser.uid : ownerUid;
+    panel.appendChild(renderAddForm(board, addFormOwner));
     const all = state.tasksByBoard[board.id] || [];
-    const scoped = board.market ? all : all.filter(t => t.owner_uid === ownerUid);
+    const scoped = (board.market || isAllMode) ? all : all.filter(t => t.owner_uid === ownerUid);
     const tasks = sortTasks(scoped);
-    panel.appendChild(mode === "kanban" ? renderKanban(board, tasks) : renderList(board, tasks));
+    panel.appendChild(mode === "kanban" ? renderKanban(board, tasks, showOwner) : renderList(board, tasks, showOwner));
     return panel;
   }
 
@@ -609,7 +629,7 @@
   function confirmOwnership(boardId, t){ updateTask(boardId, t.id, {owner_confirmed:true}); }
 
   function requestTransfer(board, t){
-    const members = board.market ? state.allUsers.map(u=>u.id) : (board.allowed_uids||[]);
+    const members = board.market ? state.allUsers.map(u=>u.id) : effectiveMembers(board);
     const eligible = state.allUsers.filter(u => members.includes(u.id) && u.id !== t.owner_uid);
     if (!eligible.length){ toast("کاربر دیگری با دسترسی به این شرکت وجود ندارد"); return; }
     const names = eligible.map((u,i)=> (i+1)+") "+(u.display_name||u.email)).join("\n");
@@ -656,14 +676,14 @@
     return sel;
   }
 
-  function renderKanban(board, tasks){
+  function renderKanban(board, tasks, showOwner){
     const wrap = el("div", {class:"kanban"});
     STATUSES.forEach(st => {
       const col = el("div", {class:"col col-"+st.cls});
       const items = tasks.filter(t => (t.status||"todo") === st.id);
       col.appendChild(el("h3", null, [st.label, el("span",{class:"cnt"},[String(items.length)])]));
       if (!items.length) col.appendChild(el("div", {class:"empty"}, ["—"]));
-      items.forEach(t => col.appendChild(renderCard(board, t)));
+      items.forEach(t => col.appendChild(renderCard(board, t, showOwner)));
       wrap.appendChild(col);
     });
     return wrap;
@@ -678,7 +698,7 @@
     return note;
   }
 
-  function renderCard(board, t){
+  function renderCard(board, t, showOwner){
     const isPending = !board.market && t.owner_confirmed === false;
     const card = el("div", {class:"card" + (isPending ? " pending-ack" : "")});
     const note = pendingAckNote(board, t);
@@ -690,7 +710,7 @@
 
     const metaRow = el("div", {class:"meta-row"});
     if (t.due) metaRow.appendChild(el("span", {class:"chip" + (isOverdue(t.due, t.status) ? " overdue" : "")}, ["⏳ " + shortJalali(t.due)]));
-    if (board.market && t.owner_uid) metaRow.appendChild(el("span", {class:"chip"}, ["👤 " + userLabel(t.owner_uid)]));
+    if (showOwner && t.owner_uid) metaRow.appendChild(el("span", {class:"chip"}, ["👤 " + userLabel(t.owner_uid)]));
     metaRow.appendChild(el("span", {class:"chip " + typeCls(t.type)}, [typeLabel(t.type || "normal")]));
     card.appendChild(metaRow);
 
@@ -712,14 +732,14 @@
     return card;
   }
 
-  function renderList(board, tasks){
+  function renderList(board, tasks, showOwner){
     const wrap = el("div", {});
     const table = el("table", {class:"list"});
     const headerCells = [el("th", null, ["عنوان"]), el("th", null, ["سررسید"])];
-    if (board.market) headerCells.push(el("th", null, ["مسئول"]));
+    if (showOwner) headerCells.push(el("th", null, ["مسئول"]));
     headerCells.push(el("th", null, ["نوع"]), el("th", null, ["وضعیت"]), el("th", null, ["یادداشت"]), el("th", null, [""]));
     table.appendChild(el("tr", null, headerCells));
-    const colspan = board.market ? "7" : "6";
+    const colspan = showOwner ? "7" : "6";
     if (!tasks.length){ table.appendChild(el("tr", null, [el("td", {colspan, class:"empty"}, ["هنوز کاری ثبت نشده."])])); }
 
     tasks.forEach(t => {
@@ -739,7 +759,7 @@
 
       tr.appendChild(el("td", null, [titleInput]));
       tr.appendChild(el("td", {class:"due-cell"}, [dueInput]));
-      if (board.market) tr.appendChild(el("td", null, [userLabel(t.owner_uid)]));
+      if (showOwner) tr.appendChild(el("td", null, [userLabel(t.owner_uid)]));
       tr.appendChild(el("td", null, [typeSelect(t.type, (e)=>updateTask(board.id,t.id,{type:e.target.value}))]));
       tr.appendChild(el("td", null, [statusSelect(t.status, (e)=> updateTask(board.id, t.id, {status: e.target.value}))]));
       tr.appendChild(el("td", null, [notesInput]));
@@ -895,12 +915,16 @@
         ]),
         el("div", {class:"actions"}, headBtns)
       ]));
-      const chips = el("div", {class:"board-chip-list"});
-      companyBoards.forEach(b => {
-        const on = (b.allowed_uids||[]).includes(u.id);
-        chips.appendChild(el("span", {class:"board-chip"+(on?" on":""), onclick: ()=>toggleUserBoard(b, u.id)}, [b.name]));
-      });
-      row.appendChild(chips);
+      if (u.role === "superadmin"){
+        row.appendChild(el("p", {class:"hint"}, ["سوپرادمین به‌صورت خودکار به همه‌ی شرکت‌ها دسترسی دارد."]));
+      } else {
+        const chips = el("div", {class:"board-chip-list"});
+        companyBoards.forEach(b => {
+          const on = (b.allowed_uids||[]).includes(u.id);
+          chips.appendChild(el("span", {class:"board-chip"+(on?" on":""), onclick: ()=>toggleUserBoard(b, u.id)}, [b.name]));
+        });
+        row.appendChild(chips);
+      }
       panel.appendChild(row);
     });
     if (!state.allUsers.length) panel.appendChild(el("p", {class:"hint"}, ["هنوز کاربری اضافه نشده."]));
@@ -950,7 +974,7 @@
       if (b.market || !isAdmin()){
         inner += all.length ? statusGroupsHTML(all, b) : '<div class="rep-none">کاری ثبت نشده.</div>';
       } else {
-        const members = b.allowed_uids||[];
+        const members = effectiveMembers(b);
         if (!members.length) inner += '<div class="rep-none">کاربری ندارد.</div>';
         members.forEach(uid => {
           const items = all.filter(t => t.owner_uid === uid);
@@ -975,7 +999,7 @@
       const all = state.tasksByBoard[b.id] || [];
       const groups = (b.market || !isAdmin())
         ? [{label:null, items: all}]
-        : (b.allowed_uids||[]).map(uid => ({label: userLabel(uid), items: all.filter(t=>t.owner_uid===uid)}));
+        : effectiveMembers(b).map(uid => ({label: userLabel(uid), items: all.filter(t=>t.owner_uid===uid)}));
       groups.forEach(g => {
         if (g.label) lines.push("  👤 " + g.label);
         if (!g.items.length){ lines.push("  کاری ثبت نشده."); return; }
