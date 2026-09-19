@@ -14,7 +14,7 @@
     --line: #ddd8cc; --accent: #8a5a3b; --accent-ink: #ffffff;
     --col-todo-bg:#FBD8DC; --col-todo-line:#D98C96;
     --col-doing-bg:#FFEBAE; --col-doing-line:#D9A93F;
-    --col-followup-bg:#CFE3F5; --col-followup-line:#6FA8D9;
+    --col-followup-bg:#FFEBAE; --col-followup-line:#D9A93F;
     --col-done-bg:#D3EFD8; --col-done-line:#5FAE6E;
     --pending-bg:#EADCF7; --pending-line:#9B6FD9;
     --danger: #a2453a; --urgent: #a2453a; --decision: #4b7a8f;
@@ -27,7 +27,7 @@
       --line: #35392f; --accent: #cf9a6e; --accent-ink: #171916;
       --col-todo-bg:#4a3236; --col-todo-line:#D98C96;
       --col-doing-bg:#4a3f22; --col-doing-line:#D9A93F;
-      --col-followup-bg:#233a4a; --col-followup-line:#6FA8D9;
+      --col-followup-bg:#4a3f22; --col-followup-line:#D9A93F;
       --col-done-bg:#22392a; --col-done-line:#5FAE6E;
       --pending-bg:#3a2a4a; --pending-line:#B08AE8;
       --danger: #d16a5d; --urgent:#d16a5d; --decision:#6fa3ba;
@@ -39,7 +39,7 @@
     --line: #35392f; --accent: #cf9a6e; --accent-ink: #171916;
     --col-todo-bg:#4a3236; --col-todo-line:#D98C96;
     --col-doing-bg:#4a3f22; --col-doing-line:#D9A93F;
-    --col-followup-bg:#233a4a; --col-followup-line:#6FA8D9;
+    --col-followup-bg:#4a3f22; --col-followup-line:#D9A93F;
     --col-done-bg:#22392a; --col-done-line:#5FAE6E;
     --pending-bg:#3a2a4a; --pending-line:#B08AE8;
     --danger: #d16a5d; --urgent:#d16a5d; --decision:#6fa3ba;
@@ -228,7 +228,6 @@
 
   const STATUSES = [
     {id:"todo", label:"در صف", cls:"todo"},
-    {id:"doing", label:"در حال انجام", cls:"doing"},
     {id:"followup", label:"در حال پیگیری", cls:"followup"},
     {id:"done", label:"انجام‌شده", cls:"done"}
   ];
@@ -294,7 +293,7 @@
   function escapeHtml(s){ return String(s==null?"":s).replace(/[&<>"']/g, m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m])); }
   function isSuperAdmin(){ return !!(currentUser && ADMIN_EMAILS.includes(currentUser.email)); }
   function isAdmin(){ return isSuperAdmin() || !!(currentUserDoc && currentUserDoc.role === "admin"); }
-  function userLabel(uid){ if (!uid) return ""; const u = allUsers.find(x=>x.id===uid); return u ? (u.display_name || u.email) : "—"; }
+  function userLabel(uid){ if (!uid) return ""; const u = allUsers.find(x=>x.id===uid); if (!u) return "—"; return u.display_name || (u.email ? u.email.split("@")[0] : "—"); }
   function normDue(v){ return v ? v : null; }
 
   // ---------- Auth / login screen ----------
@@ -538,7 +537,7 @@
     const isPending = !board.market && t.owner_confirmed === false;
     const card = el("div", {class:"card" + (isPending ? " pending-ack" : "")});
     if (isPending){
-      const note = el("div", {class:"pending-note"}, ["✨ یک کار جدید برایت اضافه شده"]);
+      const note = el("div", {class:"pending-note"}, ["✨ از طرف " + userLabel(t.created_by)]);
       if (t.owner_uid === currentUser.uid){
         note.appendChild(el("button", {onclick:()=>confirmOwnership(board.id, t)}, ["تأیید و شروع"]));
       }
@@ -604,7 +603,7 @@
       tr.appendChild(el("td", null, [xferBtn, del]));
       table.appendChild(tr);
       if (isPending && t.owner_uid === currentUser.uid){
-        const note = el("div", {class:"pending-note"}, ["✨ یک کار جدید برایت اضافه شده"]);
+        const note = el("div", {class:"pending-note"}, ["✨ از طرف " + userLabel(t.created_by)]);
         note.appendChild(el("button", {onclick:()=>confirmOwnership(board.id, t)}, ["تأیید و شروع"]));
         table.appendChild(el("tr", null, [el("td", {colspan: board.market?"7":"6"}, [note])]));
       }
