@@ -310,15 +310,12 @@
   }
 
   async function ensureProfile(){
-    const { data } = await sbMain.from("profiles").select("*").eq("id", currentUser.uid).maybeSingle();
-    if (!data){
-      const role = isSuperAdmin() ? "superadmin" : "member";
-      const { error } = await sbMain.from("profiles").insert({
-        id: currentUser.uid, email: currentUser.email, role,
-        display_name: currentUser.email.split("@")[0]
-      });
-      if (error) throw error;
-    }
+    const role = isSuperAdmin() ? "superadmin" : "member";
+    const { error } = await sbMain.from("profiles").upsert({
+      id: currentUser.uid, email: currentUser.email, role,
+      display_name: currentUser.email.split("@")[0]
+    }, { onConflict: "id", ignoreDuplicates: true });
+    if (error) throw error;
   }
 
   // ---------- Boards / access scope ----------
