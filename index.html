@@ -214,7 +214,7 @@
     <div id="content"></div>
   </div>
 
-  <footer>هر تغییری همین‌جا برای همه‌ی اعضا ذخیره و همگام می‌شود.</footer>
+  <footer>هر تغییری همین‌جا برای همه‌ی اعضا ذخیره و همگام می‌شود.<br><span style="opacity:.5;">نسخه: BUILD-2026-09-19-3</span></footer>
 </div>
 <div class="toast" id="toast"></div>
 
@@ -222,6 +222,9 @@
 (function(){
   "use strict";
 
+  // ============================================================
+  // Config
+  // ============================================================
   const ADMIN_EMAILS = ["roozfarah@gmail.com"];
   const SUPABASE_URL = "https://netfxmjpkwhtsasuiebv.supabase.co";
   const SUPABASE_ANON_KEY = "sb_publishable_bn8jPHFIpWflNtJNuz-rfw_4Ikmh-tM";
@@ -241,6 +244,7 @@
     {key:"supply", label:"واردات/تأمین"}, {key:"risk", label:"ریسک این هفته"},
     {key:"opportunity", label:"فرصت این هفته"}, {key:"bottleneck", label:"گلوگاه این هفته"}, {key:"decision", label:"تصمیم/اقدام"}
   ];
+  const ACTIVE_TAB_STORAGE_KEY = "opshub_active_tab";
 
   const sbMain = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
   let sbSecondary = null;
@@ -253,18 +257,27 @@
     return sbSecondary;
   }
 
-  let currentUser = null;       // {uid, email}
-  let currentUserDoc = null;    // profile row
-  let allUsers = [];            // profiles
-  let dbReady = false;
-  let boards = [];
-  let tasksByBoard = {};
-  let weeklyRows = [];
-  let activeTab = null;
-  let viewMode = {};
-  let subUserByBoard = {};
-  let subscribedBoardIds = new Set();
+  // ============================================================
+  // State — every piece of mutable app state lives here
+  // ============================================================
+  const state = {
+    currentUser: null,      // {uid, email}
+    currentUserDoc: null,   // profile row for currentUser
+    allUsers: [],           // all profiles
+    boards: [],
+    tasksByBoard: {},       // boardId -> task[]
+    weeklyRows: [],
+    activeTab: null,        // boardId | "weekly" | "admin"
+    viewMode: {},           // boardId -> "kanban" | "list"
+    subUserByBoard: {},     // boardId -> uid (admin's selected sub-space)
+    subscribedBoardIds: new Set(),
+    dbReady: false,
+    uiBusy: false           // true while a multi-step action (e.g. creating a user) is in flight
+  };
 
+  // ============================================================
+  // DOM refs & small helpers
+  // ============================================================
   const tabsEl = document.getElementById("tabs");
   const contentEl = document.getElementById("content");
   const bannerEl = document.getElementById("conn-banner");
@@ -274,6 +287,7 @@
   const authedAreaEl = document.getElementById("authedArea");
 
   function toast(msg){ toastEl.textContent = msg; toastEl.classList.add("show"); setTimeout(()=> toastEl.classList.remove("show"), 2200); }
+
   function el(tag, attrs, children){
     const e = document.createElement(tag);
     if (attrs) for (const k in attrs){
@@ -285,18 +299,89 @@
     (children||[]).forEach(c => { if (c!==null && c!==undefined) e.appendChild(typeof c === "string" ? document.createTextNode(c) : c); });
     return e;
   }
+
+  function debounce(fn, ms){
+    let timer;
+    return function(...args){ clearTimeout(timer); timer = setTimeout(()=> fn.apply(this, args), ms); };
+  }
+
   function todayStr(){ const d=new Date(); return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`; }
   function isOverdue(due, status){ if (!due || status === "done") return false; return due < todayStr(); }
   function shortJalali(dateKey){ try{ return new Intl.DateTimeFormat("fa-IR-u-ca-persian", {month:"long", day:"numeric"}).format(new Date(dateKey+"T00:00:00")); }catch(e){ return dateKey; } }
+  function normDue(v){ return v ? v : null; }
   function typeLabel(id){ const t = TYPES.find(x=>x.id===id); return t ? t.label : ""; }
   function typeCls(id){ return "type-" + (id || "normal"); }
   function escapeHtml(s){ return String(s==null?"":s).replace(/[&<>"']/g, m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m])); }
-  function isSuperAdmin(){ return !!(currentUser && ADMIN_EMAILS.includes(currentUser.email)); }
-  function isAdmin(){ return isSuperAdmin() || !!(currentUserDoc && currentUserDoc.role === "admin"); }
-  function userLabel(uid){ if (!uid) return ""; const u = allUsers.find(x=>x.id===uid); if (!u) return "—"; return u.display_name || (u.email ? u.email.split("@")[0] : "—"); }
-  function normDue(v){ return v ? v : null; }
 
-  // ---------- Auth / login screen ----------
+  function isSuperAdmin(){ return !!(state.currentUser && ADMIN_EMAILS.includes(state.currentUser.email)); }
+  function isAdmin(){ return isSuperAdmin() || !!(state.currentUserDoc && state.currentUserDoc.role === "admin"); }
+  function userLabel(uid){
+    if (!uid) return "";
+    const u = state.allUsers.find(x=>x.id===uid);
+    if (!u) return "—";
+    return u.display_name || (u.email ? u.email.split("@")[0] : "—");
+  }
+
+  function withTimeout(promise, ms, label){
+    return Promise.race([
+      promise,
+      new Promise((_, reject) => setTimeout(()=> reject(new Error("زمان درخواست («"+label+"») تمام شد — پاسخی از سرور نرسید")), ms))
+    ]);
+  }
+
+  // A single place that does "write to Supabase, show an error if it failed, refetch on success".
+  // Every mutating action in the app goes through this so the error-handling/refetch pattern
+  // isn't repeated by hand at every call site.
+  async function dbWrite(promise, {errorPrefix = "ذخیره نشد", onSuccess} = {}){
+    const { error } = await promise;
+    if (error){ toast(errorPrefix + ": " + error.message); return false; }
+    if (onSuccess) await onSuccess();
+    return true;
+  }
+
+  // ============================================================
+  // Rendering guards — don't tear the DOM down while the person
+  // is mid-typing or mid-action, or their in-progress input is lost.
+  // ============================================================
+  function isTypingActive(){
+    const a = document.activeElement;
+    return !!(a && contentEl.contains(a) && (a.tagName === "TEXTAREA" || a.tagName === "INPUT"));
+  }
+
+  function render(){
+    if (!state.currentUser) return;
+    if (isTypingActive() || state.uiBusy) return;
+    if (state.activeTab){ try{ localStorage.setItem(ACTIVE_TAB_STORAGE_KEY, state.activeTab); }catch(e){} }
+
+    renderTabs();
+    contentEl.innerHTML = "";
+    document.getElementById("toolbar").style.display = state.dbReady ? "flex" : "none";
+    if (!state.dbReady){ contentEl.appendChild(el("div", {class:"panel"}, [el("p", {class:"hint"}, ["در حال اتصال..."])])); return; }
+
+    if (state.activeTab === "admin" && isAdmin()){ contentEl.appendChild(renderAdmin()); return; }
+    if (state.activeTab === "weekly"){
+      if (!isAdmin()){ state.activeTab = null; }
+      else { contentEl.appendChild(renderWeekly()); return; }
+    }
+    const board = myAccessibleBoards().find(b => b.id === state.activeTab);
+    if (!board){
+      const mine = myAccessibleBoards();
+      if (mine.length){ state.activeTab = mine[0].id; render(); return; }
+      contentEl.appendChild(el("div", {class:"panel"}, [ el("p", {class:"hint"}, ["هنوز به هیچ شرکتی دسترسی نداری. از ادمین بخواه دسترسی بدهد."]) ]));
+      return;
+    }
+    contentEl.appendChild(renderBoard(board));
+  }
+
+  function renderAfterInteraction(){
+    // Called after focus leaves an editable field, so external changes made
+    // while typing was blocking re-renders get picked up promptly.
+    setTimeout(()=>{ if (!isTypingActive()) render(); }, 60);
+  }
+
+  // ============================================================
+  // Auth / login screen
+  // ============================================================
   function renderLogin(errMsg){
     userBoxEl.style.display = "none";
     authedAreaEl.style.display = "none";
@@ -310,28 +395,29 @@
       if (error) err.textContent = "ورود ناموفق بود — ایمیل یا رمز را بررسی کن.";
     }}, ["ورود"]);
     passIn.addEventListener("keydown", (e)=>{ if (e.key==="Enter") submit.click(); });
-    const wrap = el("div", {class:"login-wrap"}, [
+    loginScreenEl.appendChild(el("div", {class:"login-wrap"}, [
       el("div", {class:"login-panel"}, [
         el("h2", null, ["ورود به اتاق عملیات"]),
         el("p", null, ["با ایمیل و رمزی که ادمین برایت ساخته وارد شو."]),
         emailIn, passIn, err, submit
       ])
-    ]);
-    loginScreenEl.appendChild(wrap);
+    ]));
   }
 
   async function editMyName(){
-    const cur = (currentUserDoc && currentUserDoc.display_name) || "";
+    const cur = (state.currentUserDoc && state.currentUserDoc.display_name) || "";
     const name = prompt("نام نمایشی جدید:", cur);
     if (name === null || !name.trim()) return;
-    const { error } = await sbMain.from("profiles").update({display_name: name.trim()}).eq("id", currentUser.uid);
-    if (error) toast("ذخیره نشد: " + error.message); else { toast("نام نمایشی به‌روزرسانی شد"); refetchUsers(); }
+    await dbWrite(
+      sbMain.from("profiles").update({display_name: name.trim()}).eq("id", state.currentUser.uid),
+      { onSuccess: async ()=>{ toast("نام نمایشی به‌روزرسانی شد"); await refetchUsers(); } }
+    );
   }
 
   function renderUserBox(){
     userBoxEl.style.display = "flex";
     userBoxEl.innerHTML = "";
-    userBoxEl.appendChild(el("span", null, [(currentUserDoc && currentUserDoc.display_name) || currentUser.email]));
+    userBoxEl.appendChild(el("span", null, [(state.currentUserDoc && state.currentUserDoc.display_name) || state.currentUser.email]));
     userBoxEl.appendChild(el("button", {class:"icon-btn", title:"ویرایش نام نمایشی", onclick: editMyName}, ["✏️"]));
     userBoxEl.appendChild(el("span", {class:"role-badge"}, [isSuperAdmin() ? "سوپرادمین" : (isAdmin() ? "ادمین" : "کاربر")]));
     userBoxEl.appendChild(el("button", {onclick: ()=> sbMain.auth.signOut()}, ["خروج"]));
@@ -340,15 +426,17 @@
   async function ensureProfile(){
     const role = isSuperAdmin() ? "superadmin" : "member";
     const { error } = await sbMain.from("profiles").upsert({
-      id: currentUser.uid, email: currentUser.email, role,
-      display_name: currentUser.email.split("@")[0]
+      id: state.currentUser.uid, email: state.currentUser.email, role,
+      display_name: state.currentUser.email.split("@")[0]
     }, { onConflict: "id", ignoreDuplicates: true });
     if (error) throw error;
   }
 
-  // ---------- Boards / access scope ----------
+  // ============================================================
+  // Boards / access scope
+  // ============================================================
   function myAccessibleBoards(){
-    return boards.filter(b => b.market || isAdmin() || (currentUser && (b.allowed_uids||[]).includes(currentUser.uid)));
+    return state.boards.filter(b => b.market || isAdmin() || (state.currentUser && (b.allowed_uids||[]).includes(state.currentUser.uid)));
   }
 
   function renderTabs(){
@@ -356,15 +444,15 @@
     const mine = myAccessibleBoards();
     const marketBoard = mine.find(b => b.market);
     if (marketBoard){
-      tabsEl.appendChild(el("button", { class: activeTab === marketBoard.id ? "active" : "", onclick: () => { activeTab = marketBoard.id; render(); } }, ["🔶 فضای اشتراک"]));
+      tabsEl.appendChild(el("button", { class: state.activeTab === marketBoard.id ? "active" : "", onclick: () => { state.activeTab = marketBoard.id; render(); } }, ["🔶 فضای اشتراک"]));
     }
     mine.filter(b => !b.market).forEach(b => {
-      tabsEl.appendChild(el("button", { class: activeTab === b.id ? "active" : "", onclick: () => { activeTab = b.id; render(); } }, [b.name]));
+      tabsEl.appendChild(el("button", { class: state.activeTab === b.id ? "active" : "", onclick: () => { state.activeTab = b.id; render(); } }, [b.name]));
     });
     if (isAdmin()){
-      tabsEl.appendChild(el("button", { class: activeTab === "weekly" ? "active" : "", onclick: () => { activeTab = "weekly"; render(); } }, ["📋 بازبینی هفتگی"]));
+      tabsEl.appendChild(el("button", { class: state.activeTab === "weekly" ? "active" : "", onclick: () => { state.activeTab = "weekly"; render(); } }, ["📋 بازبینی هفتگی"]));
       tabsEl.appendChild(el("button", { class: "ghost", onclick: addCompanyBoard }, ["+ افزودن شرکت"]));
-      tabsEl.appendChild(el("button", { class: "admin-tab" + (activeTab==="admin"?" active":""), onclick: ()=>{ activeTab="admin"; render(); } }, ["👤 کاربران"]));
+      tabsEl.appendChild(el("button", { class: "admin-tab" + (state.activeTab==="admin"?" active":""), onclick: ()=>{ state.activeTab="admin"; render(); } }, ["👤 کاربران"]));
     }
   }
 
@@ -372,69 +460,44 @@
     const name = prompt("نام شرکت جدید:");
     if (!name || !name.trim()) return;
     const { data, error } = await sbMain.from("boards").insert({ name: name.trim(), market:false, allowed_uids: [], order_num: Date.now() }).select().single();
-    if (error){ alert("ذخیره نشد: " + error.message); return; }
-    activeTab = data.id;
+    if (error){ toast("ذخیره نشد: " + error.message); return; }
+    state.activeTab = data.id;
     refetchBoards();
   }
   async function renameBoard(b){
     const name = prompt("نام جدید شرکت:", b.name);
     if (!name || !name.trim()) return;
-    const { error } = await sbMain.from("boards").update({name: name.trim()}).eq("id", b.id);
-    if (error) toast("ذخیره نشد: " + error.message); else refetchBoards();
+    await dbWrite(sbMain.from("boards").update({name: name.trim()}).eq("id", b.id), { onSuccess: refetchBoards });
   }
   async function archiveBoard(b){
     if (!confirm('تخته "'+b.name+'" از لیست تب‌ها حذف شود؟ (تسک‌های ثبت‌شده باقی می‌مانند)')) return;
-    const { error } = await sbMain.from("boards").update({archived:true}).eq("id", b.id);
-    if (error){ toast("حذف نشد: " + error.message); return; }
-    if (activeTab === b.id) activeTab = null;
+    const ok = await dbWrite(sbMain.from("boards").update({archived:true}).eq("id", b.id), { errorPrefix:"حذف نشد" });
+    if (!ok) return;
+    if (state.activeTab === b.id) state.activeTab = null;
     refetchBoards();
-  }
-
-  // ---------- Render ----------
-  let uiBusy = false;
-  function isTypingActive(){
-    const a = document.activeElement;
-    return !!(a && contentEl.contains(a) && (a.tagName === "TEXTAREA" || a.tagName === "INPUT"));
-  }
-  function render(){
-    if (!currentUser){ return; }
-    if (isTypingActive() || uiBusy) return; // don't rebuild the DOM mid-typing or mid-action, or in-progress work is lost
-    if (activeTab){ try{ localStorage.setItem("opshub_active_tab", activeTab); }catch(e){} }
-    renderTabs();
-    contentEl.innerHTML = "";
-    document.getElementById("toolbar").style.display = dbReady ? "flex" : "none";
-    if (!dbReady){ contentEl.appendChild(el("div", {class:"panel"}, [el("p", {class:"hint"}, ["در حال اتصال..."])])); return; }
-    if (activeTab === "admin" && isAdmin()){ contentEl.appendChild(renderAdmin()); return; }
-    if (activeTab === "weekly"){
-      if (!isAdmin()){ activeTab = null; }
-      else { contentEl.appendChild(renderWeekly()); return; }
-    }
-    const board = myAccessibleBoards().find(b => b.id === activeTab);
-    if (!board){
-      const mine = myAccessibleBoards();
-      if (mine.length){ activeTab = mine[0].id; render(); return; }
-      contentEl.appendChild(el("div", {class:"panel"}, [ el("p", {class:"hint"}, ["هنوز به هیچ شرکتی دسترسی نداری. از ادمین بخواه دسترسی بدهد."]) ]));
-      return;
-    }
-    contentEl.appendChild(renderBoard(board));
   }
 
   function ownerScopeFor(board){
     if (board.market) return null;
-    if (!isAdmin()) return currentUser.uid;
-    const members = (board.allowed_uids||[]);
+    if (!isAdmin()) return state.currentUser.uid;
+    const members = board.allowed_uids || [];
     if (!members.length) return null;
-    if (!subUserByBoard[board.id] || !members.includes(subUserByBoard[board.id])) subUserByBoard[board.id] = members[0];
-    return subUserByBoard[board.id];
+    if (!state.subUserByBoard[board.id] || !members.includes(state.subUserByBoard[board.id])){
+      state.subUserByBoard[board.id] = members[0];
+    }
+    return state.subUserByBoard[board.id];
   }
 
+  // ============================================================
+  // Board / task rendering
+  // ============================================================
   function renderBoard(board){
-    const mode = viewMode[board.id] || "kanban";
+    const mode = state.viewMode[board.id] || "kanban";
     const panel = el("div", {class:"panel"});
     const headActions = [
       el("div", {class:"viewtoggle"}, [
-        el("button", {class: mode==="kanban"?"active":"", onclick: ()=>{ viewMode[board.id]="kanban"; render(); }}, ["کانبان"]),
-        el("button", {class: mode==="list"?"active":"", onclick: ()=>{ viewMode[board.id]="list"; render(); }}, ["لیست"])
+        el("button", {class: mode==="kanban"?"active":"", onclick: ()=>{ state.viewMode[board.id]="kanban"; render(); }}, ["کانبان"]),
+        el("button", {class: mode==="list"?"active":"", onclick: ()=>{ state.viewMode[board.id]="list"; render(); }}, ["لیست"])
       ])
     ];
     if (!board.market && isAdmin()){
@@ -443,23 +506,23 @@
     }
     panel.appendChild(el("div", {class:"board-head"}, [ el("h2", null, [board.name]), el("div", {class:"actions"}, headActions) ]));
 
-    let ownerUid = ownerScopeFor(board);
+    const ownerUid = ownerScopeFor(board);
     if (!board.market && isAdmin()){
-      const members = (board.allowed_uids||[]);
+      const members = board.allowed_uids || [];
       if (!members.length){
         panel.appendChild(el("p", {class:"hint"}, ["هنوز هیچ کاربری به این شرکت دسترسی ندارد — از تب «کاربران» دسترسی بده."]));
         return panel;
       }
       const subTabs = el("div", {class:"toolbar", style:"margin-bottom:14px;"});
       members.forEach(uid => {
-        subTabs.appendChild(el("button", {class:"btn small "+(ownerUid===uid?"":"secondary"), onclick:()=>{ subUserByBoard[board.id]=uid; render(); }}, [userLabel(uid)]));
+        subTabs.appendChild(el("button", {class:"btn small "+(ownerUid===uid?"":"secondary"), onclick:()=>{ state.subUserByBoard[board.id]=uid; render(); }}, [userLabel(uid)]));
       });
       panel.appendChild(el("p", {class:"hint"}, ["فضای هر کاربر داخل این شرکت جدا و خصوصی است — این نمای «فضای " + userLabel(ownerUid) + "» است."]));
       panel.appendChild(subTabs);
     }
 
     panel.appendChild(renderAddForm(board, ownerUid));
-    const all = tasksByBoard[board.id] || [];
+    const all = state.tasksByBoard[board.id] || [];
     const scoped = board.market ? all : all.filter(t => t.owner_uid === ownerUid);
     const tasks = sortTasks(scoped);
     panel.appendChild(mode === "kanban" ? renderKanban(board, tasks) : renderList(board, tasks));
@@ -484,7 +547,7 @@
     const addBtn = el("button", {class:"btn", onclick: ()=>{
       const v = title.value.trim();
       if (!v) return;
-      const needsAck = !board.market && ownerUid && ownerUid !== currentUser.uid;
+      const needsAck = !board.market && ownerUid && ownerUid !== state.currentUser.uid;
       addTask(boardId, { title:v, due:normDue(due.value), owner_uid: board.market ? null : ownerUid, type:typeSel.value||"normal", owner_confirmed: !needsAck });
       title.value=""; due.value=todayStr(); typeSel.value="normal";
       title.focus();
@@ -497,33 +560,28 @@
     const row = Object.assign({
       board_id: boardId, status:"todo", notes:"", due:null, owner_uid:null, type:"normal", owner_confirmed:true,
       pending_transfer_to:null, pending_transfer_by:null,
-      created_order: Date.now(), created_by: currentUser.uid
+      created_order: Date.now(), created_by: state.currentUser.uid
     }, data);
-    const { error } = await sbMain.from("tasks").insert(row);
-    if (error) alert("ذخیره نشد: " + error.message);
-    else refetchTasks(boardId);
+    await dbWrite(sbMain.from("tasks").insert(row), { onSuccess: ()=>refetchTasks(boardId) });
   }
   async function updateTask(boardId, taskId, data){
     if (data.due !== undefined) data = Object.assign({}, data, {due: normDue(data.due)});
-    const { error } = await sbMain.from("tasks").update(data).eq("id", taskId);
-    if (error) toast("ذخیره نشد: " + error.message);
-    else refetchTasks(boardId);
+    await dbWrite(sbMain.from("tasks").update(data).eq("id", taskId), { onSuccess: ()=>refetchTasks(boardId) });
   }
   async function deleteTask(boardId, taskId){
-    const { error } = await sbMain.from("tasks").delete().eq("id", taskId);
-    if (error) toast("حذف نشد: " + error.message);
-    else refetchTasks(boardId);
+    await dbWrite(sbMain.from("tasks").delete().eq("id", taskId), { errorPrefix:"حذف نشد", onSuccess: ()=>refetchTasks(boardId) });
   }
+  function confirmOwnership(boardId, t){ updateTask(boardId, t.id, {owner_confirmed:true}); }
 
   function requestTransfer(board, t){
-    const members = board.market ? allUsers.map(u=>u.id) : (board.allowed_uids||[]);
-    const eligible = allUsers.filter(u => members.includes(u.id) && u.id !== t.owner_uid);
+    const members = board.market ? state.allUsers.map(u=>u.id) : (board.allowed_uids||[]);
+    const eligible = state.allUsers.filter(u => members.includes(u.id) && u.id !== t.owner_uid);
     if (!eligible.length){ toast("کاربر دیگری با دسترسی به این شرکت وجود ندارد"); return; }
     const names = eligible.map((u,i)=> (i+1)+") "+(u.display_name||u.email)).join("\n");
     const pick = prompt("انتقال به کدام کاربر؟ عدد را وارد کن:\n"+names);
     const idx = parseInt(pick,10)-1;
     if (isNaN(idx) || !eligible[idx]) return;
-    updateTask(board.id, t.id, {pending_transfer_to: eligible[idx].id, pending_transfer_by: currentUser.uid});
+    updateTask(board.id, t.id, {pending_transfer_to: eligible[idx].id, pending_transfer_by: state.currentUser.uid});
     toast("درخواست انتقال ارسال شد");
   }
   function acceptTransfer(boardId, t){ updateTask(boardId, t.id, {owner_uid: t.pending_transfer_to, pending_transfer_to:null, pending_transfer_by:null}); }
@@ -531,7 +589,7 @@
 
   function renderTransferBox(boardId, t){
     if (!t.pending_transfer_to) return null;
-    const isTarget = t.pending_transfer_to === currentUser.uid;
+    const isTarget = t.pending_transfer_to === state.currentUser.uid;
     const box = el("div", {class:"transfer-box"}, [
       "🔁 در انتظار تأیید " + userLabel(t.pending_transfer_to) + " (از طرف " + userLabel(t.pending_transfer_by) + ")"
     ]);
@@ -542,6 +600,25 @@
       ]));
     }
     return box;
+  }
+
+  function statusSelect(current, onChange){
+    const sel = el("select", {onchange: onChange});
+    STATUSES.forEach(st => {
+      const opt = el("option", {value: st.id}, [st.label]);
+      if ((current||"todo") === st.id) opt.setAttribute("selected","selected");
+      sel.appendChild(opt);
+    });
+    return sel;
+  }
+  function typeSelect(current, onChange){
+    const sel = el("select", {onchange: onChange});
+    TYPES.forEach(ty => {
+      const opt = el("option", {value:ty.id}, [ty.label]);
+      if ((current||"normal")===ty.id) opt.setAttribute("selected","selected");
+      sel.appendChild(opt);
+    });
+    return sel;
   }
 
   function renderKanban(board, tasks){
@@ -557,18 +634,21 @@
     return wrap;
   }
 
-  function confirmOwnership(boardId, t){ updateTask(boardId, t.id, {owner_confirmed:true}); }
+  function pendingAckNote(board, t, onConfirmedEl){
+    if (board.market || t.owner_confirmed !== false) return null;
+    const note = el("div", {class:"pending-note"}, ["✨ از طرف " + userLabel(t.created_by)]);
+    if (t.owner_uid === state.currentUser.uid){
+      note.appendChild(el("button", {onclick:()=>confirmOwnership(board.id, t)}, ["تأیید و شروع"]));
+    }
+    return note;
+  }
 
   function renderCard(board, t){
     const isPending = !board.market && t.owner_confirmed === false;
     const card = el("div", {class:"card" + (isPending ? " pending-ack" : "")});
-    if (isPending){
-      const note = el("div", {class:"pending-note"}, ["✨ از طرف " + userLabel(t.created_by)]);
-      if (t.owner_uid === currentUser.uid){
-        note.appendChild(el("button", {onclick:()=>confirmOwnership(board.id, t)}, ["تأیید و شروع"]));
-      }
-      card.appendChild(note);
-    }
+    const note = pendingAckNote(board, t);
+    if (note) card.appendChild(note);
+
     card.appendChild(el("p", {class:"title"}, [t.title]));
     const tb = renderTransferBox(board.id, t);
     if (tb) card.appendChild(tb);
@@ -581,17 +661,16 @@
 
     const fields = el("div", {class:"fields"});
     const dueInput = el("input", {type:"date", class:"f-due", onchange:(e)=> updateTask(board.id, t.id, {due:e.target.value})}); dueInput.value = t.due || "";
-    const typeSelect = el("select", {class:"f-type", onchange:(e)=> updateTask(board.id, t.id, {type:e.target.value})});
-    TYPES.forEach(ty => { const o = el("option", {value:ty.id}, [ty.label]); if ((t.type||"normal")===ty.id) o.setAttribute("selected","selected"); typeSelect.appendChild(o); });
-    fields.appendChild(dueInput); fields.appendChild(typeSelect);
+    fields.appendChild(dueInput);
+    fields.appendChild(typeSelect(t.type, (e)=> updateTask(board.id, t.id, {type:e.target.value})));
     card.appendChild(fields);
 
     const notes = el("textarea", {placeholder:"یادداشت..."}); notes.value = t.notes || "";
-    let notesTimer; notes.addEventListener("input", ()=>{ clearTimeout(notesTimer); notesTimer=setTimeout(()=> updateTask(board.id, t.id, {notes: notes.value}), 500); });
+    notes.addEventListener("input", debounce(()=> updateTask(board.id, t.id, {notes: notes.value}), 500));
     card.appendChild(notes);
 
-    const sel = el("select", {class:"status-sel", onchange:(e)=> updateTask(board.id, t.id, {status: e.target.value})});
-    STATUSES.forEach(st => { const opt = el("option", {value: st.id}, [st.label]); if ((t.status||"todo") === st.id) opt.setAttribute("selected","selected"); sel.appendChild(opt); });
+    const sel = statusSelect(t.status, (e)=> updateTask(board.id, t.id, {status: e.target.value}));
+    sel.className = "status-sel";
     const xferBtn = el("button", {class:"icon-btn", title:"ارسال به کاربر دیگر", onclick:()=>requestTransfer(board,t)}, ["🔁"]);
     const del = el("button", {class:"icon-btn", title:"حذف", onclick: ()=>{ if(confirm("این کار حذف شود؟")) deleteTask(board.id, t.id); }}, ["✕"]);
     card.appendChild(el("div", {class:"row"}, [sel, xferBtn, del]));
@@ -605,100 +684,109 @@
     if (board.market) headerCells.push(el("th", null, ["مسئول"]));
     headerCells.push(el("th", null, ["نوع"]), el("th", null, ["وضعیت"]), el("th", null, ["یادداشت"]), el("th", null, [""]));
     table.appendChild(el("tr", null, headerCells));
-    if (!tasks.length){ table.appendChild(el("tr", null, [el("td", {colspan: board.market?"7":"6", class:"empty"}, ["هنوز کاری ثبت نشده."])])); }
+    const colspan = board.market ? "7" : "6";
+    if (!tasks.length){ table.appendChild(el("tr", null, [el("td", {colspan, class:"empty"}, ["هنوز کاری ثبت نشده."])])); }
+
     tasks.forEach(t => {
       const isPending = !board.market && t.owner_confirmed === false;
       const tr = el("tr", {class: (isOverdue(t.due, t.status) ? "row-overdue" : "") + (isPending ? " pending-ack" : "")});
+
       const titleInput = el("input", {type:"text"}); titleInput.value = t.title || "";
-      let tTimer; titleInput.addEventListener("input", ()=>{ clearTimeout(tTimer); tTimer=setTimeout(()=>updateTask(board.id,t.id,{title:titleInput.value}),500); });
+      titleInput.addEventListener("input", debounce(()=>updateTask(board.id,t.id,{title:titleInput.value}), 500));
+
       const dueInput = el("input", {type:"date", onchange:(e)=>updateTask(board.id,t.id,{due:e.target.value})}); dueInput.value = t.due || "";
-      const typeSelect = el("select", {onchange:(e)=>updateTask(board.id,t.id,{type:e.target.value})});
-      TYPES.forEach(ty => { const o = el("option", {value:ty.id}, [ty.label]); if ((t.type||"normal")===ty.id) o.setAttribute("selected","selected"); typeSelect.appendChild(o); });
-      const sel = el("select", {onchange:(e)=> updateTask(board.id, t.id, {status: e.target.value})});
-      STATUSES.forEach(st => { const opt = el("option", {value: st.id}, [st.label]); if ((t.status||"todo") === st.id) opt.setAttribute("selected","selected"); sel.appendChild(opt); });
+
       const notesInput = el("textarea", {rows:"1"}); notesInput.value = t.notes || "";
-      let nTimer; notesInput.addEventListener("input", ()=>{ clearTimeout(nTimer); nTimer=setTimeout(()=>updateTask(board.id,t.id,{notes:notesInput.value}),500); });
+      notesInput.addEventListener("input", debounce(()=>updateTask(board.id,t.id,{notes:notesInput.value}), 500));
+
       const xferBtn = el("button", {class:"icon-btn", title:"ارسال به کاربر دیگر", onclick:()=>requestTransfer(board,t)}, ["🔁"]);
       const del = el("button", {class:"icon-btn", title:"حذف", onclick: ()=>{ if(confirm("این کار حذف شود؟")) deleteTask(board.id, t.id); }}, ["✕"]);
+
       tr.appendChild(el("td", null, [titleInput]));
       tr.appendChild(el("td", {class:"due-cell"}, [dueInput]));
       if (board.market) tr.appendChild(el("td", null, [userLabel(t.owner_uid)]));
-      tr.appendChild(el("td", null, [typeSelect]));
-      tr.appendChild(el("td", null, [sel]));
+      tr.appendChild(el("td", null, [typeSelect(t.type, (e)=>updateTask(board.id,t.id,{type:e.target.value}))]));
+      tr.appendChild(el("td", null, [statusSelect(t.status, (e)=> updateTask(board.id, t.id, {status: e.target.value}))]));
       tr.appendChild(el("td", null, [notesInput]));
       tr.appendChild(el("td", null, [xferBtn, del]));
       table.appendChild(tr);
-      if (isPending && t.owner_uid === currentUser.uid){
-        const note = el("div", {class:"pending-note"}, ["✨ از طرف " + userLabel(t.created_by)]);
-        note.appendChild(el("button", {onclick:()=>confirmOwnership(board.id, t)}, ["تأیید و شروع"]));
-        table.appendChild(el("tr", null, [el("td", {colspan: board.market?"7":"6"}, [note])]));
-      }
+
+      const note = pendingAckNote(board, t);
+      if (note) table.appendChild(el("tr", null, [el("td", {colspan}, [note])]));
       const tb = renderTransferBox(board.id, t);
-      if (tb){ table.appendChild(el("tr", null, [el("td", {colspan: board.market?"7":"6"}, [tb])])); }
+      if (tb) table.appendChild(el("tr", null, [el("td", {colspan}, [tb])]));
     });
+
     wrap.appendChild(table);
     return wrap;
   }
 
-  // ---------- Weekly ----------
+  // ============================================================
+  // Weekly review
+  // ============================================================
   function renderWeekly(){
     const panel = el("div", {class:"panel"});
     panel.appendChild(el("div", {class:"board-head"}, [ el("h2", null, ["بازبینی هفتگی شرکت"]), el("div", {class:"actions"}, [ el("button", {class:"btn", onclick: addWeekRow}, ["+ هفته‌ی جدید"]) ]) ]));
     panel.appendChild(el("p", {class:"hint"}, ["اعداد را از منابع خودت کپی کن؛ این‌جا فقط محل تجمیع است."]));
-    const rows = weeklyRows.slice().sort((a,b)=> (b.date_sort||0)-(a.date_sort||0));
-    const scroll = el("div", {class:"weekly-scroll"});
+
+    const rows = state.weeklyRows.slice().sort((a,b)=> (b.date_sort||0)-(a.date_sort||0));
     const table = el("table", {class:"weekly"});
     const headerRow = el("tr", null, [el("th", null, ["تاریخ"])]);
     WEEKLY_FIELDS.forEach(f => headerRow.appendChild(el("th", null, [f.label])));
     headerRow.appendChild(el("th", null, [""]));
     table.appendChild(headerRow);
     if (!rows.length){ table.appendChild(el("tr", null, [el("td", {colspan: String(WEEKLY_FIELDS.length+2), class:"empty"}, ["هنوز هفته‌ای ثبت نشده."])])); }
+
     rows.forEach(r => {
       const tr = el("tr", null);
       tr.appendChild(el("td", {class:"datecell"}, [r.date || ""]));
       WEEKLY_FIELDS.forEach(f => {
         const ta = el("textarea", {rows:"1"}); ta.value = r[f.key] || "";
-        let timer; ta.addEventListener("input", ()=>{ clearTimeout(timer); timer=setTimeout(async ()=>{ await sbMain.from("weekly").update({[f.key]: ta.value}).eq("id", r.id); refetchWeekly(); },500); });
+        ta.addEventListener("input", debounce(async ()=>{
+          await dbWrite(sbMain.from("weekly").update({[f.key]: ta.value}).eq("id", r.id), { onSuccess: refetchWeekly });
+        }, 500));
         tr.appendChild(el("td", null, [ta]));
       });
       const del = el("button", {class:"icon-btn", title:"حذف این هفته", onclick: async ()=>{
         if (!confirm("ردیف این هفته حذف شود؟")) return;
-        const { error } = await sbMain.from("weekly").delete().eq("id", r.id);
-        if (error) toast("حذف نشد: " + error.message); else refetchWeekly();
+        await dbWrite(sbMain.from("weekly").delete().eq("id", r.id), { errorPrefix:"حذف نشد", onSuccess: refetchWeekly });
       }}, ["✕"]);
       tr.appendChild(el("td", null, [del]));
       table.appendChild(tr);
     });
-    scroll.appendChild(table); panel.appendChild(scroll);
+
+    const scroll = el("div", {class:"weekly-scroll"}); scroll.appendChild(table);
+    panel.appendChild(scroll);
     return panel;
   }
+
   async function addWeekRow(){
-    const today = new Date(); const dateStr = today.toLocaleDateString("fa-IR");
-    const row = { date: dateStr, date_sort: today.getTime() };
+    const today = new Date();
+    const row = { date: today.toLocaleDateString("fa-IR"), date_sort: today.getTime() };
     WEEKLY_FIELDS.forEach(f => row[f.key] = "");
-    const { error } = await sbMain.from("weekly").insert(row);
-    if (error) alert("ذخیره نشد: " + error.message); else refetchWeekly();
+    await dbWrite(sbMain.from("weekly").insert(row), { onSuccess: refetchWeekly });
   }
 
-  // ---------- Admin ----------
+  // ============================================================
+  // Admin panel
+  // ============================================================
   function boardStatsForUser(uid){
     let done=0, open=0;
-    Object.values(tasksByBoard).forEach(list=>{
+    Object.values(state.tasksByBoard).forEach(list=>{
       (list||[]).forEach(t=>{ if (t.owner_uid===uid){ if ((t.status||"todo")==="done") done++; else open++; } });
     });
     return {done, open};
   }
+
   async function toggleUserBoard(board, uid){
     const cur = new Set(board.allowed_uids||[]);
     if (cur.has(uid)) cur.delete(uid); else cur.add(uid);
-    const { error } = await sbMain.from("boards").update({allowed_uids: Array.from(cur)}).eq("id", board.id);
-    if (error) toast("ذخیره نشد: " + error.message); else refetchBoards();
+    await dbWrite(sbMain.from("boards").update({allowed_uids: Array.from(cur)}).eq("id", board.id), { onSuccess: refetchBoards });
   }
   async function toggleAdminRole(u){
     if (u.role === "superadmin") return;
     if (!confirm((u.role==="admin" ? "سلب" : "اعطای") + " نقش ادمین برای " + (u.display_name||u.email) + "؟")) return;
-    const { error } = await sbMain.from("profiles").update({role: u.role==="admin" ? "member" : "admin"}).eq("id", u.id);
-    if (error) toast("انجام نشد: " + error.message); else refetchUsers();
+    await dbWrite(sbMain.from("profiles").update({role: u.role==="admin" ? "member" : "admin"}).eq("id", u.id), { errorPrefix:"انجام نشد", onSuccess: refetchUsers });
   }
   async function sendPasswordReset(u){
     if (!confirm("ایمیل بازنشانی رمز برای " + u.email + " ارسال شود؟")) return;
@@ -708,20 +796,12 @@
   async function renameUser(u){
     const name = prompt("نام نمایشی جدید برای " + u.email + ":", u.display_name || "");
     if (name === null || !name.trim()) return;
-    const { error } = await sbMain.from("profiles").update({display_name: name.trim()}).eq("id", u.id);
-    if (error) toast("ذخیره نشد: " + error.message); else { toast("نام نمایشی به‌روزرسانی شد"); refetchUsers(); }
+    await dbWrite(sbMain.from("profiles").update({display_name: name.trim()}).eq("id", u.id), { onSuccess: async ()=>{ toast("نام نمایشی به‌روزرسانی شد"); await refetchUsers(); } });
   }
-  function withTimeout(promise, ms, label){
-    return Promise.race([
-      promise,
-      new Promise((_, reject) => setTimeout(()=> reject(new Error("زمان درخواست («"+label+"») تمام شد — پاسخی از سرور نرسید")), ms))
-    ]);
-  }
+
   async function createUser(email, password, displayName){
-    console.log("[ops-hub] createUser: start", email);
     const client2 = getSecondaryClient();
     const { data, error } = await withTimeout(client2.auth.signUp({ email, password }), 15000, "ثبت‌نام");
-    console.log("[ops-hub] createUser: signUp result", { data, error });
     if (error) throw error;
     if (!data || !data.user) throw new Error("ثبت‌نام ناموفق بود — احتمالاً این ایمیل قبلاً ثبت شده است");
     if (Array.isArray(data.user.identities) && data.user.identities.length === 0){
@@ -733,7 +813,6 @@
       sbMain.from("profiles").upsert({ id: uid, email, role:"member", display_name: displayName || email.split("@")[0] }, {onConflict:"id", ignoreDuplicates:true}),
       15000, "ذخیره پروفایل"
     );
-    console.log("[ops-hub] createUser: profile upsert error?", err2);
     if (err2) throw err2;
     return uid;
   }
@@ -741,31 +820,30 @@
   function renderAdmin(){
     const panel = el("div", {class:"panel"});
     panel.appendChild(el("div", {class:"board-head"}, [ el("h2", null, ["مدیریت کاربران و دسترسی‌ها"]) ]));
+
     const emailIn = el("input", {type:"email", class:"f-title", placeholder:"ایمیل کاربر جدید"});
     const passIn = el("input", {type:"password", class:"f-due", placeholder:"رمز عبور موقت"});
     const nameIn = el("input", {type:"text", class:"f-type", placeholder:"نام نمایشی (اختیاری)"});
     const addBtn = el("button", {class:"btn", onclick: async ()=>{
-      console.log("[ops-hub] add-user button clicked");
       const email = emailIn.value.trim(), pass = passIn.value;
       if (!email || pass.length < 6){ toast("ایمیل معتبر و رمز حداقل ۶ کاراکتری لازم است"); return; }
-      addBtn.disabled = true; uiBusy = true;
+      addBtn.disabled = true; state.uiBusy = true;
       try{
         await createUser(email, pass, nameIn.value.trim());
         toast("کاربر ساخته شد");
         emailIn.value=""; passIn.value=""; nameIn.value="";
-      }
-      catch(e){
+      }catch(e){
         console.error("createUser failed:", e);
         const detail = [e && e.message, e && e.code, e && e.details, e && e.hint].filter(Boolean).join(" | ");
         alert("ساخت کاربر ناموفق بود:\n" + (detail || String(e)));
       }
-      addBtn.disabled = false; uiBusy = false;
+      addBtn.disabled = false; state.uiBusy = false;
       await refetchUsers();
     }}, ["افزودن کاربر"]);
     panel.appendChild(el("div", {class:"add-form"}, [emailIn, passIn, nameIn, addBtn]));
 
-    const companyBoards = boards.filter(b => !b.market);
-    allUsers.slice().sort((a,b)=> (a.email||"").localeCompare(b.email||"")).forEach(u => {
+    const companyBoards = state.boards.filter(b => !b.market);
+    state.allUsers.slice().sort((a,b)=> (a.email||"").localeCompare(b.email||"")).forEach(u => {
       const stats = boardStatsForUser(u.id);
       const row = el("div", {class:"user-row"});
       const roleLabel = u.role === "superadmin" ? "سوپرادمین" : (u.role === "admin" ? "ادمین" : "کاربر");
@@ -790,12 +868,17 @@
       row.appendChild(chips);
       panel.appendChild(row);
     });
-    if (!allUsers.length) panel.appendChild(el("p", {class:"hint"}, ["هنوز کاربری اضافه نشده."]));
+    if (!state.allUsers.length) panel.appendChild(el("p", {class:"hint"}, ["هنوز کاربری اضافه نشده."]));
     return panel;
   }
 
-  // ---------- Report ----------
-  function latestWeek(){ if (!weeklyRows.length) return null; return weeklyRows.slice().sort((a,b)=>(b.date_sort||0)-(a.date_sort||0))[0]; }
+  // ============================================================
+  // Report
+  // ============================================================
+  function latestWeek(){
+    if (!state.weeklyRows.length) return null;
+    return state.weeklyRows.slice().sort((a,b)=>(b.date_sort||0)-(a.date_sort||0))[0];
+  }
   function reportBoardsData(){
     return myAccessibleBoards().slice().sort((a,b)=>{ if (!!a.market !== !!b.market) return a.market ? 1 : -1; return (a.order_num||0)-(b.order_num||0); });
   }
@@ -827,7 +910,7 @@
     const bds = reportBoardsData();
     if (!bds.length) return parts.join("") + '<div class="rep-none">هنوز تخته‌ای وجود ندارد.</div>';
     bds.forEach(b => {
-      const all = tasksByBoard[b.id] || [];
+      const all = state.tasksByBoard[b.id] || [];
       let inner = `<div class="rep-board-name">${escapeHtml(b.name)}</div>`;
       if (b.market || !isAdmin()){
         inner += all.length ? statusGroupsHTML(all, b) : '<div class="rep-none">کاری ثبت نشده.</div>';
@@ -854,8 +937,10 @@
     }
     reportBoardsData().forEach(b => {
       lines.push(""); lines.push("▪️ " + b.name);
-      const all = tasksByBoard[b.id] || [];
-      const groups = (b.market || !isAdmin()) ? [{label:null, items: all}] : (b.allowed_uids||[]).map(uid => ({label: userLabel(uid), items: all.filter(t=>t.owner_uid===uid)}));
+      const all = state.tasksByBoard[b.id] || [];
+      const groups = (b.market || !isAdmin())
+        ? [{label:null, items: all}]
+        : (b.allowed_uids||[]).map(uid => ({label: userLabel(uid), items: all.filter(t=>t.owner_uid===uid)}));
       groups.forEach(g => {
         if (g.label) lines.push("  👤 " + g.label);
         if (!g.items.length){ lines.push("  کاری ثبت نشده."); return; }
@@ -885,9 +970,11 @@
     document.body.appendChild(overlay);
   }
 
-  // ---------- Backup ----------
+  // ============================================================
+  // Backup
+  // ============================================================
   function exportBackup(){
-    const backup = { exportedAt:new Date().toISOString(), boards: myAccessibleBoards(), tasksByBoard, weeklyRows: isAdmin()?weeklyRows:[] };
+    const backup = { exportedAt:new Date().toISOString(), boards: myAccessibleBoards(), tasksByBoard: state.tasksByBoard, weeklyRows: isAdmin() ? state.weeklyRows : [] };
     const blob = new Blob([JSON.stringify(backup,null,2)], {type:"application/json"});
     const url = URL.createObjectURL(blob);
     const a = el("a", {href:url, download:"ops-hub-backup-"+todayStr()+".json"});
@@ -911,87 +998,8 @@
     }catch(e){ console.error(e); toast("فایل پشتیبان معتبر نبود"); }
   }
 
-  // ---------- Realtime subscriptions ----------
-  function showBanner(msg){ bannerEl.innerHTML = ""; if (msg) bannerEl.appendChild(el("div", {class:"banner"}, [msg])); }
-
-  async function ensureMarketBoard(){
-    if (!isAdmin()) return;
-    const { data } = await sbMain.from("boards").select("id").eq("market", true).maybeSingle();
-    if (!data){ await sbMain.from("boards").insert({ name:"فضای اشتراک", market:true, allowed_uids: [], order_num:0 }); }
-  }
-
-  function channelExists(name){
-    try{ return sbMain.getChannels().some(c => c.topic === "realtime:"+name); }catch(e){ return false; }
-  }
-
-  async function refetchUsers(){
-    const { data, error } = await sbMain.from("profiles").select("*");
-    if (error) return;
-    allUsers = data || [];
-    currentUserDoc = allUsers.find(u => u.id === currentUser.uid) || currentUserDoc;
-    renderUserBox();
-    render();
-  }
-  function subscribeUsers(){
-    refetchUsers();
-    if (channelExists("profiles-all")) return;
-    sbMain.channel("profiles-all").on("postgres_changes", {event:"*", schema:"public", table:"profiles"}, refetchUsers).subscribe();
-  }
-
-  async function refetchBoards(){
-    const { data, error } = await sbMain.from("boards").select("*");
-    if (error){ showBanner("اتصال به پایگاه‌داده قطع شد: " + error.message); return; }
-    boards = (data||[]).filter(b => !b.archived);
-    boards.forEach(b => { if (!subscribedBoardIds.has(b.id)) subscribeTasks(b.id); });
-    if (activeTab === null){
-      const mine = myAccessibleBoards();
-      let saved = null;
-      try{ saved = localStorage.getItem("opshub_active_tab") || null; }catch(e){}
-      if (saved && (saved === "weekly" || saved === "admin" || mine.some(b => b.id === saved))){
-        activeTab = saved;
-      } else {
-        const first = mine.find(b => !b.market) || mine.find(b=>b.market);
-        if (first) activeTab = first.id;
-      }
-    }
-    dbReady = true;
-    render();
-  }
-  function subscribeBoards(){
-    refetchBoards();
-    if (channelExists("boards-all")) return;
-    sbMain.channel("boards-all").on("postgres_changes", {event:"*", schema:"public", table:"boards"}, refetchBoards).subscribe();
-  }
-
-  async function refetchTasks(boardId){
-    const { data, error } = await sbMain.from("tasks").select("*").eq("board_id", boardId);
-    if (error) return;
-    tasksByBoard[boardId] = data || [];
-    render();
-  }
-  function subscribeTasks(boardId){
-    subscribedBoardIds.add(boardId);
-    refetchTasks(boardId);
-    if (channelExists("tasks-"+boardId)) return;
-    sbMain.channel("tasks-"+boardId).on("postgres_changes", {event:"*", schema:"public", table:"tasks", filter:"board_id=eq."+boardId}, ()=>refetchTasks(boardId)).subscribe();
-  }
-
-  async function refetchWeekly(){
-    if (!isAdmin()) return;
-    const { data, error } = await sbMain.from("weekly").select("*");
-    if (error) return;
-    weeklyRows = data || [];
-    render();
-  }
-  function subscribeWeekly(){
-    if (!isAdmin()) return;
-    refetchWeekly();
-    if (channelExists("weekly-all")) return;
-    sbMain.channel("weekly-all").on("postgres_changes", {event:"*", schema:"public", table:"weekly"}, refetchWeekly).subscribe();
-  }
-
   function wireToolbar(){
-    contentEl.addEventListener("focusout", ()=>{ setTimeout(()=>{ if (!isTypingActive()) render(); }, 60); });
+    contentEl.addEventListener("focusout", renderAfterInteraction);
     document.getElementById("reportBtn").addEventListener("click", showReportModal);
     document.getElementById("exportBtn").addEventListener("click", exportBackup);
     document.getElementById("importBtn").addEventListener("click", ()=> document.getElementById("importFile").click());
@@ -1000,12 +1008,102 @@
     });
   }
 
+  // ============================================================
+  // Data fetching + realtime subscriptions
+  // One helper (ensureRealtimeChannel) sets up every channel the same
+  // way, and guards against creating the same channel twice.
+  // ============================================================
+  function showBanner(msg){ bannerEl.innerHTML = ""; if (msg) bannerEl.appendChild(el("div", {class:"banner"}, [msg])); }
+
+  function channelExists(name){
+    try{ return sbMain.getChannels().some(c => c.topic === "realtime:"+name); }catch(e){ return false; }
+  }
+  function ensureRealtimeChannel(name, table, onChange, filter){
+    if (channelExists(name)) return;
+    const config = {event:"*", schema:"public", table};
+    if (filter) config.filter = filter;
+    sbMain.channel(name).on("postgres_changes", config, onChange).subscribe();
+  }
+
+  async function ensureMarketBoard(){
+    if (!isAdmin()) return;
+    const { data } = await sbMain.from("boards").select("id").eq("market", true).maybeSingle();
+    if (!data){ await sbMain.from("boards").insert({ name:"فضای اشتراک", market:true, allowed_uids: [], order_num:0 }); }
+  }
+
+  async function refetchUsers(){
+    const { data, error } = await sbMain.from("profiles").select("*");
+    if (error) return;
+    state.allUsers = data || [];
+    state.currentUserDoc = state.allUsers.find(u => u.id === state.currentUser.uid) || state.currentUserDoc;
+    renderUserBox();
+    render();
+  }
+  function subscribeUsers(){
+    refetchUsers();
+    ensureRealtimeChannel("profiles-all", "profiles", refetchUsers);
+  }
+
+  async function refetchBoards(){
+    const { data, error } = await sbMain.from("boards").select("*");
+    if (error){ showBanner("اتصال به پایگاه‌داده قطع شد: " + error.message); return; }
+    state.boards = (data||[]).filter(b => !b.archived);
+    state.boards.forEach(b => { if (!state.subscribedBoardIds.has(b.id)) subscribeTasks(b.id); });
+    if (state.activeTab === null){
+      const mine = myAccessibleBoards();
+      let saved = null;
+      try{ saved = localStorage.getItem(ACTIVE_TAB_STORAGE_KEY) || null; }catch(e){}
+      if (saved && (saved === "weekly" || saved === "admin" || mine.some(b => b.id === saved))){
+        state.activeTab = saved;
+      } else {
+        const first = mine.find(b => !b.market) || mine.find(b=>b.market);
+        if (first) state.activeTab = first.id;
+      }
+    }
+    state.dbReady = true;
+    render();
+  }
+  function subscribeBoards(){
+    refetchBoards();
+    ensureRealtimeChannel("boards-all", "boards", refetchBoards);
+  }
+
+  async function refetchTasks(boardId){
+    const { data, error } = await sbMain.from("tasks").select("*").eq("board_id", boardId);
+    if (error) return;
+    state.tasksByBoard[boardId] = data || [];
+    render();
+  }
+  function subscribeTasks(boardId){
+    state.subscribedBoardIds.add(boardId);
+    refetchTasks(boardId);
+    ensureRealtimeChannel("tasks-"+boardId, "tasks", ()=>refetchTasks(boardId), "board_id=eq."+boardId);
+  }
+
+  async function refetchWeekly(){
+    if (!isAdmin()) return;
+    const { data, error } = await sbMain.from("weekly").select("*");
+    if (error) return;
+    state.weeklyRows = data || [];
+    render();
+  }
+  function subscribeWeekly(){
+    if (!isAdmin()) return;
+    refetchWeekly();
+    ensureRealtimeChannel("weekly-all", "weekly", refetchWeekly);
+  }
+
+  // ============================================================
+  // Boot
+  // ============================================================
   let started = false;
+
   async function startAfterAuth(){
     authedAreaEl.style.display = "block";
     loginScreenEl.innerHTML = "";
     showBanner(null);
-    try{ await ensureProfile(); } catch(e){ showBanner("خطا در بارگذاری پروفایل کاربر: " + (e && e.message || e)); return; }
+    try{ await ensureProfile(); }
+    catch(e){ showBanner("خطا در بارگذاری پروفایل کاربر: " + (e && e.message || e)); return; }
     subscribeUsers();
     await ensureMarketBoard().catch(()=>{});
     subscribeBoards();
@@ -1013,18 +1111,19 @@
   }
 
   function resetState(){
-    currentUser = null; currentUserDoc = null; dbReady = false; started = false;
-    boards = []; tasksByBoard = {}; weeklyRows = []; allUsers = []; activeTab = null; subscribedBoardIds = new Set();
+    state.currentUser = null; state.currentUserDoc = null; state.dbReady = false; started = false;
+    state.boards = []; state.tasksByBoard = {}; state.weeklyRows = []; state.allUsers = [];
+    state.activeTab = null; state.subscribedBoardIds = new Set();
     sbMain.removeAllChannels();
   }
 
-  async function boot(){
+  function boot(){
     wireToolbar();
     renderLogin();
     sbMain.auth.onAuthStateChange((event, session) => {
       const user = session && session.user;
       if (user){
-        currentUser = { uid:user.id, email:user.email };
+        state.currentUser = { uid:user.id, email:user.email };
         if (!started){ started = true; startAfterAuth(); }
       } else {
         resetState();
