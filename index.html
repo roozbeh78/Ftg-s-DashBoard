@@ -320,10 +320,19 @@
     loginScreenEl.appendChild(wrap);
   }
 
+  async function editMyName(){
+    const cur = (currentUserDoc && currentUserDoc.display_name) || "";
+    const name = prompt("نام نمایشی جدید:", cur);
+    if (name === null || !name.trim()) return;
+    const { error } = await sbMain.from("profiles").update({display_name: name.trim()}).eq("id", currentUser.uid);
+    if (error) toast("ذخیره نشد: " + error.message); else toast("نام نمایشی به‌روزرسانی شد");
+  }
+
   function renderUserBox(){
     userBoxEl.style.display = "flex";
     userBoxEl.innerHTML = "";
     userBoxEl.appendChild(el("span", null, [(currentUserDoc && currentUserDoc.display_name) || currentUser.email]));
+    userBoxEl.appendChild(el("button", {class:"icon-btn", title:"ویرایش نام نمایشی", onclick: editMyName}, ["✏️"]));
     userBoxEl.appendChild(el("span", {class:"role-badge"}, [isSuperAdmin() ? "سوپرادمین" : (isAdmin() ? "ادمین" : "کاربر")]));
     userBoxEl.appendChild(el("button", {onclick: ()=> sbMain.auth.signOut()}, ["خروج"]));
   }
@@ -674,6 +683,12 @@
     const { error } = await sbMain.auth.resetPasswordForEmail(u.email);
     if (error) toast("ارسال نشد: " + error.message); else toast("ایمیل بازنشانی رمز ارسال شد");
   }
+  async function renameUser(u){
+    const name = prompt("نام نمایشی جدید برای " + u.email + ":", u.display_name || "");
+    if (name === null || !name.trim()) return;
+    const { error } = await sbMain.from("profiles").update({display_name: name.trim()}).eq("id", u.id);
+    if (error) toast("ذخیره نشد: " + error.message); else toast("نام نمایشی به‌روزرسانی شد");
+  }
   async function createUser(email, password, displayName){
     const client2 = getSecondaryClient();
     const { data, error } = await client2.auth.signUp({ email, password });
@@ -711,6 +726,7 @@
         headBtns.push(el("button", {class:"btn small secondary", onclick: ()=>toggleAdminRole(u)}, [u.role==="admin" ? "سلب نقش ادمین" : "ارتقا به ادمین"]));
       }
       headBtns.push(el("button", {class:"btn small secondary", onclick: ()=>sendPasswordReset(u)}, ["ارسال ایمیل بازنشانی رمز"]));
+      headBtns.push(el("button", {class:"btn small secondary", onclick: ()=>renameUser(u)}, ["ویرایش نام نمایشی"]));
       row.appendChild(el("div", {class:"u-head"}, [
         el("div", null, [
           el("div", {class:"u-email"}, [u.display_name || u.email, " ", el("span",{class:"role-badge"},[roleLabel])]),
@@ -932,12 +948,26 @@
     await ensureMarketBoard().catch(()=>{});
     subscribeBoards();
     subscribeWeekly();
+    startPolling();
   }
+
+  let pollTimer = null;
+  function startPolling(){
+    stopPolling();
+    pollTimer = setInterval(()=>{
+      refetchUsers();
+      refetchBoards();
+      if (isAdmin()) refetchWeekly();
+      subscribedBoardIds.forEach(id => refetchTasks(id));
+    }, 8000);
+  }
+  function stopPolling(){ if (pollTimer){ clearInterval(pollTimer); pollTimer = null; } }
 
   function resetState(){
     currentUser = null; currentUserDoc = null; dbReady = false; started = false;
     boards = []; tasksByBoard = {}; weeklyRows = []; allUsers = []; activeTab = null; subscribedBoardIds = new Set();
     sbMain.removeAllChannels();
+    stopPolling();
   }
 
   async function boot(){
