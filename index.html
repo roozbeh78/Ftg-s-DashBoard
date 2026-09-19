@@ -240,7 +240,7 @@
     </div>
   </div>
 
-  <footer>هر تغییری همین‌جا برای همه‌ی اعضا ذخیره و همگام می‌شود.<br><span style="opacity:.5;">نسخه: BUILD-2026-09-19-6-superadmin-allspaces</span></footer>
+  <footer>هر تغییری همین‌جا برای همه‌ی اعضا ذخیره و همگام می‌شود.<br><span style="opacity:.5;">نسخه: BUILD-2026-09-19-5-activity</span></footer>
 </div>
 <div class="toast" id="toast"></div>
 
@@ -254,6 +254,7 @@
   const ADMIN_EMAILS = ["roozfarah@gmail.com"];
   const SUPABASE_URL = "https://netfxmjpkwhtsasuiebv.supabase.co";
   const SUPABASE_ANON_KEY = "sb_publishable_bn8jPHFIpWflNtJNuz-rfw_4Ikmh-tM";
+  const VAPID_PUBLIC_KEY = "BJKhBqgyAHM1rpRipqKz8sgVEAX8eNIqj9_M-t3-WH2u66ByIulHnVzxgCum1mKOfqS2uFeHnNmGVRyEeWk94rQ";
 
   const STATUSES = [
     {id:"todo", label:"در صف", cls:"todo"},
@@ -450,11 +451,53 @@
     );
   }
 
+  function urlBase64ToUint8Array(base64String){
+    const padding = "=".repeat((4 - base64String.length % 4) % 4);
+    const base64 = (base64String + padding).replace(/-/g, "+").replace(/_/g, "/");
+    const raw = atob(base64);
+    const arr = new Uint8Array(raw.length);
+    for (let i = 0; i < raw.length; ++i) arr[i] = raw.charCodeAt(i);
+    return arr;
+  }
+
+  async function enablePushNotifications(){
+    if (!("serviceWorker" in navigator) || !("PushManager" in window)){
+      toast("مرورگرت از نوتیفیکیشن پشتیبانی نمی‌کند"); return;
+    }
+    try{
+      const reg = await navigator.serviceWorker.register("sw.js");
+      const perm = await Notification.requestPermission();
+      if (perm !== "granted"){ toast("اجازه‌ی نوتیفیکیشن داده نشد"); return; }
+      let sub = await reg.pushManager.getSubscription();
+      if (!sub){
+        sub = await reg.pushManager.subscribe({
+          userVisibleOnly: true,
+          applicationServerKey: urlBase64ToUint8Array(VAPID_PUBLIC_KEY)
+        });
+      }
+      const json = sub.toJSON();
+      const ok = await dbWrite(
+        sbMain.from("push_subscriptions").upsert({
+          user_id: state.currentUser.uid,
+          endpoint: json.endpoint,
+          p256dh: json.keys.p256dh,
+          auth_key: json.keys.auth
+        }, { onConflict: "endpoint" }),
+        { errorPrefix: "ثبت نوتیف ناموفق بود" }
+      );
+      if (ok) toast("نوتیفیکیشن فعال شد ✓");
+    }catch(e){
+      console.error("enablePushNotifications failed:", e);
+      toast("فعال‌سازی نوتیف ناموفق بود: " + (e && e.message || e));
+    }
+  }
+
   function renderUserBox(){
     userBoxEl.style.display = "flex";
     userBoxEl.innerHTML = "";
     userBoxEl.appendChild(el("span", null, [(state.currentUserDoc && state.currentUserDoc.display_name) || state.currentUser.email]));
     userBoxEl.appendChild(el("button", {class:"icon-btn", title:"ویرایش نام نمایشی", onclick: editMyName}, ["✏️"]));
+    userBoxEl.appendChild(el("button", {class:"icon-btn", title:"فعال‌کردن نوتیفیکیشن", onclick: enablePushNotifications}, ["🔔"]));
     userBoxEl.appendChild(el("span", {class:"role-badge"}, [isSuperAdmin() ? "سوپرادمین" : (isAdmin() ? "ادمین" : "کاربر")]));
     userBoxEl.appendChild(el("button", {onclick: ()=> sbMain.auth.signOut()}, ["خروج"]));
   }
