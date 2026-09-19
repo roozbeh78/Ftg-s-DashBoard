@@ -538,6 +538,15 @@
     });
   }
 
+  function preventButtonFocus(...buttons){
+    buttons.forEach(button => {
+      if (!button) return;
+      button.addEventListener("mousedown", (e) => {
+        e.preventDefault();
+      });
+    });
+  }
+
   function renderAddForm(board, ownerUid){
     const boardId = board.id;
     const title = el("input", {type:"text", class:"f-title", placeholder:"عنوان کار جدید..."});
@@ -552,6 +561,7 @@
       title.value=""; due.value=todayStr(); typeSel.value="normal";
       title.focus();
     }}, ["افزودن"]);
+    preventButtonFocus(addBtn);
     title.addEventListener("keydown", (e)=>{ if (e.key === "Enter") addBtn.click(); });
     return el("div", {class:"add-form"}, [title, due, typeSel, addBtn]);
   }
@@ -840,6 +850,7 @@
       addBtn.disabled = false; state.uiBusy = false;
       await refetchUsers();
     }}, ["افزودن کاربر"]);
+    preventButtonFocus(addBtn);
     panel.appendChild(el("div", {class:"add-form"}, [emailIn, passIn, nameIn, addBtn]));
 
     const companyBoards = state.boards.filter(b => !b.market);
