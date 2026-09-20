@@ -85,6 +85,8 @@
   nav.tabs button.ghost{ border-style:dashed; color:var(--ink-dim); }
   nav.tabs button.admin-tab{ border-color:var(--accent); color:var(--accent); }
   nav.tabs button.admin-tab.active{ background:var(--accent); color:var(--accent-ink); border-color:var(--accent); }
+  nav.tabs button.tab-pending{ border-color:var(--pending-line); color:var(--pending-line); font-weight:700; }
+  nav.tabs button.tab-pending.active{ background:var(--pending-line); color:#fff; border-color:var(--pending-line); }
 
   .toolbar{ display:flex; flex-wrap:wrap; gap:8px; margin-bottom:18px; }
 
@@ -246,7 +248,7 @@
     </div>
   </div>
 
-  <footer>هر تغییری همین‌جا برای همه‌ی اعضا ذخیره و همگام می‌شود.<br><span style="opacity:.5;">نسخه: BUILD-2026-09-19-5-activity</span></footer>
+  <footer>هر تغییری همین‌جا برای همه‌ی اعضا ذخیره و همگام می‌شود.<br><span style="opacity:.5;">نسخه: BUILD-2026-09-19-8-counts-pending</span></footer>
 </div>
 <div class="toast" id="toast"></div>
 
@@ -524,15 +526,31 @@
     return state.boards.filter(b => b.market || isAdmin() || (state.currentUser && (b.allowed_uids||[]).includes(state.currentUser.uid)));
   }
 
+  function boardOpenCount(board){
+    const tasks = state.tasksByBoard[board.id] || [];
+    const relevant = board.market
+      ? tasks
+      : tasks.filter(t => isAdmin() ? true : t.owner_uid === state.currentUser.uid);
+    return relevant.filter(t => (t.status||"todo") !== "done").length;
+  }
+  function boardHasPending(board){
+    if (board.market) return false;
+    const tasks = state.tasksByBoard[board.id] || [];
+    return tasks.some(t => t.owner_confirmed === false && (isAdmin() ? true : t.owner_uid === state.currentUser.uid));
+  }
+
   function renderTabs(){
     tabsEl.innerHTML = "";
     const mine = myAccessibleBoards();
     const marketBoard = mine.find(b => b.market);
     if (marketBoard){
-      tabsEl.appendChild(el("button", { class: state.activeTab === marketBoard.id ? "active" : "", onclick: () => { state.activeTab = marketBoard.id; render(); } }, ["🔶 فضای اشتراک"]));
+      const cnt = boardOpenCount(marketBoard);
+      tabsEl.appendChild(el("button", { class: state.activeTab === marketBoard.id ? "active" : "", onclick: () => { state.activeTab = marketBoard.id; render(); } }, ["🔶 فضای اشتراک" + (cnt ? " ("+cnt+")" : "")]));
     }
     mine.filter(b => !b.market).forEach(b => {
-      tabsEl.appendChild(el("button", { class: state.activeTab === b.id ? "active" : "", onclick: () => { state.activeTab = b.id; render(); } }, [b.name]));
+      const cnt = boardOpenCount(b);
+      const pending = boardHasPending(b);
+      tabsEl.appendChild(el("button", { class: (state.activeTab === b.id ? "active" : "") + (pending ? " tab-pending" : ""), onclick: () => { state.activeTab = b.id; render(); } }, [b.name + (cnt ? " ("+cnt+")" : "")]));
     });
     if (isAdmin()){
       tabsEl.appendChild(el("button", { class: state.activeTab === "weekly" ? "active" : "", onclick: () => { state.activeTab = "weekly"; render(); } }, ["📋 بازبینی هفتگی"]));
@@ -1283,6 +1301,7 @@
 
   boot();
 })();
+
 </script>
 </body>
 </html>
