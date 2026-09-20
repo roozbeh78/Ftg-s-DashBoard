@@ -247,7 +247,7 @@
     </div>
   </div>
 
-  <footer>هر تغییری همین‌جا برای همه‌ی اعضا ذخیره و همگام می‌شود.<br><span style="opacity:.5;">نسخه: BUILD-2026-09-19-12-cancel-send</span></footer>
+  <footer>هر تغییری همین‌جا برای همه‌ی اعضا ذخیره و همگام می‌شود.<br><span style="opacity:.5;">نسخه: BUILD-2026-09-19-13-tab-color-fix</span></footer>
 </div>
 <div class="toast" id="toast"></div>
 
@@ -535,7 +535,11 @@
   function boardHasPending(board){
     if (board.market) return false;
     const tasks = state.tasksByBoard[board.id] || [];
-    return tasks.some(t => t.owner_confirmed === false && (isAdmin() ? true : t.owner_uid === state.currentUser.uid));
+    return tasks.some(t => {
+      if (isAdmin()) return t.owner_confirmed === false || !!t.pending_transfer_to;
+      return (t.owner_confirmed === false && t.owner_uid === state.currentUser.uid)
+        || t.pending_transfer_to === state.currentUser.uid;
+    });
   }
 
   function renderTabs(){
