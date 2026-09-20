@@ -247,7 +247,7 @@
     </div>
   </div>
 
-  <footer>هر تغییری همین‌جا برای همه‌ی اعضا ذخیره و همگام می‌شود.<br><span style="opacity:.5;">نسخه: BUILD-2026-09-19-11-transfer-visible</span></footer>
+  <footer>هر تغییری همین‌جا برای همه‌ی اعضا ذخیره و همگام می‌شود.<br><span style="opacity:.5;">نسخه: BUILD-2026-09-19-12-cancel-send</span></footer>
 </div>
 <div class="toast" id="toast"></div>
 
@@ -735,6 +735,11 @@
   }
   function acceptTransfer(boardId, t){ updateTask(boardId, t.id, {owner_uid: t.pending_transfer_to, pending_transfer_to:null, pending_transfer_by:null}); }
   function declineTransfer(boardId, t){ updateTask(boardId, t.id, {pending_transfer_to:null, pending_transfer_by:null}); }
+  function cancelTransfer(boardId, t){ updateTask(boardId, t.id, {pending_transfer_to:null, pending_transfer_by:null}); }
+  function cancelAssignment(boardId, t){
+    if (!confirm('ارسال «'+t.title+'» لغو و حذف شود؟')) return;
+    deleteTask(boardId, t.id);
+  }
 
   // A task is "locked" while someone hasn't yet accepted responsibility for it —
   // either a brand-new assignment (owner_confirmed:false) or an outstanding transfer.
@@ -744,26 +749,32 @@
   function renderLockBox(board, t){
     if (t.owner_confirmed === false){
       const isDecider = t.owner_uid === state.currentUser.uid;
+      const isSender = t.created_by === state.currentUser.uid;
       const box = el("div", {class:"transfer-box"}, ["✨ از طرف " + userLabel(t.created_by) + " — در انتظار تأیید " + userLabel(t.owner_uid)]);
+      const actions = [];
       if (isDecider){
-        box.appendChild(el("div", {class:"t-actions"}, [
-          el("button", {class:"accept", onclick:()=>confirmOwnership(board.id, t)}, ["تأیید و شروع"]),
-          el("button", {class:"decline", onclick:()=>rejectAssignment(board.id, t)}, ["رد"])
-        ]));
+        actions.push(el("button", {class:"accept", onclick:()=>confirmOwnership(board.id, t)}, ["تأیید و شروع"]));
+        actions.push(el("button", {class:"decline", onclick:()=>rejectAssignment(board.id, t)}, ["رد"]));
+      } else if (isSender){
+        actions.push(el("button", {class:"decline", onclick:()=>cancelAssignment(board.id, t)}, ["لغو ارسال"]));
       }
+      if (actions.length) box.appendChild(el("div", {class:"t-actions"}, actions));
       return box;
     }
     if (t.pending_transfer_to){
       const isTarget = t.pending_transfer_to === state.currentUser.uid;
+      const isSender = t.pending_transfer_by === state.currentUser.uid;
       const box = el("div", {class:"transfer-box"}, [
         "🔁 در انتظار تأیید " + userLabel(t.pending_transfer_to) + " (از طرف " + userLabel(t.pending_transfer_by) + ")"
       ]);
+      const actions = [];
       if (isTarget){
-        box.appendChild(el("div", {class:"t-actions"}, [
-          el("button", {class:"accept", onclick:()=>acceptTransfer(board.id,t)}, ["قبول"]),
-          el("button", {class:"decline", onclick:()=>declineTransfer(board.id,t)}, ["رد"])
-        ]));
+        actions.push(el("button", {class:"accept", onclick:()=>acceptTransfer(board.id,t)}, ["قبول"]));
+        actions.push(el("button", {class:"decline", onclick:()=>declineTransfer(board.id,t)}, ["رد"]));
+      } else if (isSender){
+        actions.push(el("button", {class:"decline", onclick:()=>cancelTransfer(board.id,t)}, ["لغو ارسال"]));
       }
+      if (actions.length) box.appendChild(el("div", {class:"t-actions"}, actions));
       return box;
     }
     return null;
