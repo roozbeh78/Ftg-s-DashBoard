@@ -247,7 +247,7 @@
     </div>
   </div>
 
-  <footer>هر تغییری همین‌جا برای همه‌ی اعضا ذخیره و همگام می‌شود.<br><span style="opacity:.5;">نسخه: BUILD-2026-09-19-13-tab-color-fix</span></footer>
+  <footer>هر تغییری همین‌جا برای همه‌ی اعضا ذخیره و همگام می‌شود.<br><span style="opacity:.5;">نسخه: BUILD-2026-09-22-14-snooze</span></footer>
 </div>
 <div class="toast" id="toast"></div>
 
@@ -725,6 +725,16 @@
     if (!confirm('این کار («'+t.title+'») رد و حذف شود؟')) return;
     deleteTask(boardId, t.id);
   }
+  function snoozeTask(boardId, t){
+    const n = prompt("یادآوری این کار چند روز به تعویق بیفتد؟", "3");
+    const days = parseInt(n, 10);
+    if (!days || days < 1) return;
+    const until = new Date(Date.now() + days*24*60*60*1000);
+    const untilStr = until.toISOString().slice(0,10);
+    updateTask(boardId, t.id, {snooze_until: untilStr});
+    toast("یادآوری تا " + shortJalali(untilStr) + " به تعویق افتاد");
+  }
+  function unsnoozeTask(boardId, t){ updateTask(boardId, t.id, {snooze_until: null}); }
 
   function requestTransfer(board, t){
     const members = board.market ? state.allUsers.map(u=>u.id) : effectiveMembers(board);
@@ -848,7 +858,16 @@
     sel.className = "status-sel";
     const xferBtn = el("button", {class:"icon-btn", title:"ارسال به کاربر دیگر", onclick:()=>requestTransfer(board,t)}, ["🔁"]);
     const del = el("button", {class:"icon-btn", title:"حذف", onclick: ()=>{ if(confirm("این کار حذف شود؟")) deleteTask(board.id, t.id); }}, ["✕"]);
-    card.appendChild(el("div", {class:"row"}, [sel, xferBtn, del]));
+    const rowBtns = [sel, xferBtn];
+    if (t.owner_uid === state.currentUser.uid){
+      if (t.snooze_until && t.snooze_until >= todayStr()){
+        rowBtns.push(el("button", {class:"icon-btn", title:"لغو به‌تعویق‌انداختن (یادآوری تا "+shortJalali(t.snooze_until)+" خاموش است)", onclick:()=>unsnoozeTask(board.id,t)}, ["😴"]));
+      } else {
+        rowBtns.push(el("button", {class:"icon-btn", title:"به‌تعویق‌انداختن یادآوری", onclick:()=>snoozeTask(board.id,t)}, ["⏰"]));
+      }
+    }
+    rowBtns.push(del);
+    card.appendChild(el("div", {class:"row"}, rowBtns));
     return card;
   }
 
@@ -891,6 +910,15 @@
 
       const xferBtn = el("button", {class:"icon-btn", title:"ارسال به کاربر دیگر", onclick:()=>requestTransfer(board,t)}, ["🔁"]);
       const del = el("button", {class:"icon-btn", title:"حذف", onclick: ()=>{ if(confirm("این کار حذف شود؟")) deleteTask(board.id, t.id); }}, ["✕"]);
+      const lastCellBtns = [xferBtn];
+      if (t.owner_uid === state.currentUser.uid){
+        if (t.snooze_until && t.snooze_until >= todayStr()){
+          lastCellBtns.push(el("button", {class:"icon-btn", title:"لغو به‌تعویق‌انداختن (تا "+shortJalali(t.snooze_until)+" خاموش)", onclick:()=>unsnoozeTask(board.id,t)}, ["😴"]));
+        } else {
+          lastCellBtns.push(el("button", {class:"icon-btn", title:"به‌تعویق‌انداختن یادآوری", onclick:()=>snoozeTask(board.id,t)}, ["⏰"]));
+        }
+      }
+      lastCellBtns.push(del);
 
       tr.appendChild(el("td", null, [titleInput]));
       tr.appendChild(el("td", {class:"due-cell"}, [dueWrap]));
@@ -898,7 +926,7 @@
       tr.appendChild(el("td", null, [typeSelect(t.type, (e)=>updateTask(board.id,t.id,{type:e.target.value}))]));
       tr.appendChild(el("td", null, [statusSelect(t.status, (e)=> updateTask(board.id, t.id, {status: e.target.value}))]));
       tr.appendChild(el("td", null, [notesInput]));
-      tr.appendChild(el("td", null, [xferBtn, del]));
+      tr.appendChild(el("td", null, lastCellBtns));
       table.appendChild(tr);
     });
 
