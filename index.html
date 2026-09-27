@@ -247,7 +247,7 @@
     </div>
   </div>
 
-  <footer>هر تغییری همین‌جا برای همه‌ی اعضا ذخیره و همگام می‌شود.<br><span style="opacity:.5;">نسخه: BUILD-2026-09-22-14-snooze</span></footer>
+  <footer>هر تغییری همین‌جا برای همه‌ی اعضا ذخیره و همگام می‌شود.<br><span style="opacity:.5;">نسخه: BUILD-2026-09-22-15-percounts</span></footer>
 </div>
 <div class="toast" id="toast"></div>
 
@@ -529,8 +529,12 @@
     const tasks = state.tasksByBoard[board.id] || [];
     const relevant = board.market
       ? tasks
-      : tasks.filter(t => isAdmin() ? true : t.owner_uid === state.currentUser.uid);
+      : tasks.filter(t => t.owner_uid === state.currentUser.uid);
     return relevant.filter(t => (t.status||"todo") !== "done").length;
+  }
+  function userOpenCount(board, uid){
+    const tasks = state.tasksByBoard[board.id] || [];
+    return tasks.filter(t => t.owner_uid === uid && (t.status||"todo") !== "done").length;
   }
   function boardHasPending(board){
     if (board.market) return false;
@@ -636,7 +640,8 @@
       }
       const subTabs = el("div", {class:"toolbar", style:"margin-bottom:14px;"});
       members.forEach(uid => {
-        subTabs.appendChild(el("button", {class:"btn small "+(ownerUid===uid?"":"secondary"), onclick:()=>{ state.subUserByBoard[board.id]=uid; render(); }}, [userLabel(uid)]));
+        const cnt = userOpenCount(board, uid);
+        subTabs.appendChild(el("button", {class:"btn small "+(ownerUid===uid?"":"secondary"), onclick:()=>{ state.subUserByBoard[board.id]=uid; render(); }}, [userLabel(uid) + (cnt ? " ("+cnt+")" : "")]));
       });
       subTabs.appendChild(el("button", {class:"btn small "+(isAllMode?"":"secondary"), onclick:()=>{ state.subUserByBoard[board.id]=ALL_SCOPE; render(); }}, ["📊 همه (داشبورد)"]));
       panel.appendChild(el("p", {class:"hint"}, [
