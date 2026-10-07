@@ -196,6 +196,21 @@
   .weekly-snap b{ display:block; margin-bottom:6px; }
 
   textarea.unsaved, input.unsaved{ border-color: var(--accent) !important; box-shadow: 0 0 0 1px var(--accent); }
+  @media print{
+    :root, :root:not([data-theme="light"]), :root[data-theme="dark"]{
+      --bg:#ffffff !important; --surface:#ffffff !important; --surface-2:#f1efe8 !important;
+      --ink:#111111 !important; --ink-dim:#555555 !important; --line:#cfcabb !important;
+      --shadow:none !important;
+    }
+    body.print-report{ background:#fff !important; color:#111 !important; }
+    body.print-report .app, body.print-report .toast{ display:none !important; }
+    body.print-report .overlay{ position:static !important; background:none !important; padding:0 !important; display:block !important; }
+    body.print-report .modal{ max-height:none !important; max-width:none !important; width:100% !important; border:none !important; box-shadow:none !important; overflow:visible !important; display:block !important; }
+    body.print-report .modal-body{ overflow:visible !important; padding:0 !important; }
+    body.print-report .modal-foot, body.print-report .modal-close{ display:none !important; }
+    body.print-report .rep-board{ break-inside:avoid-page; }
+    body.print-report .chip.overdue, body.print-report .chip{ -webkit-print-color-adjust:exact; print-color-adjust:exact; }
+  }
   .toast{ position:fixed; bottom:20px; left:50%; transform:translateX(-50%); background:var(--ink); color:var(--bg); padding:10px 20px; border-radius:8px; font-size:13px; opacity:0; pointer-events:none; transition:opacity .25s; z-index:300; }
   .toast.show{ opacity:1; }
   footer{ text-align:center; color:var(--ink-dim); font-size:12px; margin-top:24px; }
@@ -248,7 +263,7 @@
     </div>
   </div>
 
-  <footer>هر تغییری همین‌جا برای همه‌ی اعضا ذخیره و همگام می‌شود.<br><span style="opacity:.5;">نسخه: BUILD-2026-09-29-19-drafts-everywhere</span></footer>
+  <footer>هر تغییری همین‌جا برای همه‌ی اعضا ذخیره و همگام می‌شود.<br><span style="opacity:.5;">نسخه: BUILD-2026-09-29-20-report-pdf</span></footer>
 </div>
 <div class="toast" id="toast"></div>
 
@@ -1251,17 +1266,28 @@
     return lines.join("\n").trim();
   }
   function showReportModal(){
-    const overlay = el("div", {class:"overlay", onclick:(e)=>{ if (e.target===overlay) overlay.remove(); }});
+    const prevTitle = document.title;
+    const cleanup = ()=>{ document.body.classList.remove("print-report"); document.title = prevTitle; };
+    const closeIt = ()=>{ cleanup(); overlay.remove(); };
+    const overlay = el("div", {class:"overlay", onclick:(e)=>{ if (e.target===overlay) closeIt(); }});
     const modal = el("div", {class:"modal"});
     modal.appendChild(el("div", {class:"modal-head"}, [
       el("div", null, [ el("div", {class:"t"}, ["گزارش اتاق عملیات"]), el("div", {class:"d"}, [new Date().toLocaleDateString("fa-IR")]) ]),
-      el("button", {class:"modal-close", onclick:()=>overlay.remove()}, ["✕"])
+      el("button", {class:"modal-close", onclick: closeIt}, ["✕"])
     ]));
     modal.appendChild(el("div", {class:"modal-body", html: buildReportHTML()}));
-    const copyBtn = el("button", {class:"btn", onclick: async ()=>{
+    const copyBtn = el("button", {class:"btn secondary", onclick: async ()=>{
       try{ await navigator.clipboard.writeText(buildReportText()); toast("متن گزارش کپی شد"); } catch(e){ toast("کپی خودکار کار نکرد"); }
     }}, ["کپی متن گزارش"]);
-    modal.appendChild(el("div", {class:"modal-foot"}, [copyBtn]));
+    // PDF: uses the browser's own print engine (it renders Persian/RTL correctly) —
+    // in the print dialog choose "Save as PDF" (on iPhone: Share → Save to Files).
+    const pdfBtn = el("button", {class:"btn", onclick: ()=>{
+      document.title = "گزارش اتاق عملیات " + new Date().toLocaleDateString("fa-IR").replace(/\//g, "-");
+      document.body.classList.add("print-report");
+      window.addEventListener("afterprint", cleanup, {once:true});
+      window.print();
+    }}, ["📄 دانلود PDF"]);
+    modal.appendChild(el("div", {class:"modal-foot"}, [pdfBtn, copyBtn]));
     overlay.appendChild(modal);
     document.body.appendChild(overlay);
   }
