@@ -263,7 +263,7 @@
     </div>
   </div>
 
-  <footer>هر تغییری همین‌جا برای همه‌ی اعضا ذخیره و همگام می‌شود.<br><span style="opacity:.5;">نسخه: BUILD-2026-09-29-20-report-pdf</span></footer>
+  <footer>هر تغییری همین‌جا برای همه‌ی اعضا ذخیره و همگام می‌شود.<br><span style="opacity:.5;">نسخه: BUILD-2026-09-30-21-manager-decision</span></footer>
 </div>
 <div class="toast" id="toast"></div>
 
@@ -287,7 +287,7 @@
   const TYPES = [
     {id:"normal", label:"عادی"},
     {id:"urgent", label:"فوری"},
-    {id:"decision", label:"نیازمند تصمیم من"}
+    {id:"decision", label:"نیازمند تصمیم مدیر"}
   ];
   const WEEKLY_FIELDS = [
     {key:"cash", label:"نقدینگی"}, {key:"inventory", label:"موجودی"}, {key:"sales", label:"فروش"},
@@ -452,6 +452,9 @@
     document.getElementById("toolbar").style.display = state.dbReady ? "flex" : "none";
     if (!state.dbReady){ contentEl.appendChild(el("div", {class:"panel"}, [el("p", {class:"hint"}, ["در حال اتصال..."])])); return; }
 
+    const decisionInbox = renderDecisionInbox();
+    if (decisionInbox) contentEl.appendChild(decisionInbox);
+
     if (state.activeTab === "admin" && isAdmin()){ contentEl.appendChild(renderAdmin()); return; }
     if (state.activeTab === "weekly"){
       if (!isAdmin()){ state.activeTab = null; }
@@ -590,6 +593,7 @@
     if (board.market) return false;
     const tasks = state.tasksByBoard[board.id] || [];
     return tasks.some(t => {
+      if (t.decision_manager === state.currentUser.uid) return true;
       if (isAdmin()) return t.owner_confirmed === false || !!t.pending_transfer_to;
       return (t.owner_confirmed === false && t.owner_uid === state.currentUser.uid)
         || t.pending_transfer_to === state.currentUser.uid;
@@ -757,7 +761,13 @@
       const v = title.value.trim();
       if (!v) return;
       const needsAck = !board.market && ownerUid && ownerUid !== state.currentUser.uid;
-      const ok = await addTask(boardId, { title:v, due:normDue(due.value), owner_uid: board.market ? null : ownerUid, type:typeSel.value||"normal", owner_confirmed: !needsAck });
+      const row = { title:v, due:normDue(due.value), owner_uid: board.market ? null : ownerUid, type:typeSel.value||"normal", owner_confirmed: !needsAck };
+      if (row.type === "decision"){
+        const mgr = await chooseManager();
+        if (!mgr) return; // no manager chosen — don't create it
+        row.decision_manager = mgr;
+      }
+      const ok = await addTask(boardId, row);
       if (ok){ clearDrafts([dk+"title", dk+"due", dk+"type"]); title.value=""; due.value=todayStr(); due.dispatchEvent(new Event("change")); typeSel.value="normal"; title.focus(); }
     }}, ["افزودن"]);
     title.addEventListener("keydown", (e)=>{ if (e.key === "Enter") addBtn.click(); });
@@ -817,9 +827,12 @@
   // A task is "locked" while someone hasn't yet accepted responsibility for it —
   // either a brand-new assignment (owner_confirmed:false) or an outstanding transfer.
   // While locked, nobody can change its status/fields; only the decider can accept/reject.
-  function isLocked(t){ return t.owner_confirmed === false || !!t.pending_transfer_to; }
+  function isLocked(t){ return t.owner_confirmed === false || !!t.pending_transfer_to || !!t.decision_manager; }
+  // On the shared board only a manager-decision referral locks a task (there is no owner there).
+  function isLockedFor(board, t){ return board.market ? !!t.decision_manager : isLocked(t); }
 
   function renderLockBox(board, t){
+    if (t.decision_manager) return renderDecisionBox(board, t);
     if (t.owner_confirmed === false){
       const isDecider = t.owner_uid === state.currentUser.uid;
       const isSender = t.created_by === state.currentUser.uid;
@@ -851,6 +864,80 @@
       return box;
     }
     return null;
+  }
+
+  // ---------- Manager decision referral ----------
+  function pickUserModal(title, users){
+    return new Promise(resolve => {
+      const overlay = el("div", {class:"overlay", onclick:(e)=>{ if (e.target===overlay){ overlay.remove(); resolve(null); } }});
+      const modal = el("div", {class:"modal", style:"max-width:360px;"});
+      modal.appendChild(el("div", {class:"modal-head"}, [
+        el("div", {class:"t"}, [title]),
+        el("button", {class:"modal-close", onclick:()=>{ overlay.remove(); resolve(null); }}, ["✕"])
+      ]));
+      const body = el("div", {class:"modal-body"});
+      users.forEach(u => body.appendChild(el("button", {class:"btn secondary", style:"display:block; width:100%; margin-bottom:8px;", onclick:()=>{ overlay.remove(); resolve(u.id); }}, [userLabel(u.id)])));
+      modal.appendChild(body); overlay.appendChild(modal); document.body.appendChild(overlay);
+    });
+  }
+  async function chooseManager(){
+    const cands = state.allUsers.filter(u => (u.role === "admin" || u.role === "superadmin") && u.id !== state.currentUser.uid);
+    if (!cands.length){ toast("مدیر دیگری برای ارجاع وجود ندارد"); return null; }
+    return await pickUserModal("ارجاع به کدام مدیر؟", cands);
+  }
+  async function changeType(board, t, sel){
+    const val = sel.value;
+    if (val !== "decision"){ updateTask(board.id, t.id, {type: val}); return; }
+    const mgr = await chooseManager();
+    if (!mgr){ sel.value = t.type || "normal"; return; }
+    await updateTask(board.id, t.id, {type:"decision", decision_manager: mgr, decision_note: null, decision_answered_by: null});
+    toast("برای تصمیم به " + userLabel(mgr) + " ارجاع شد");
+  }
+  async function returnDecision(board, t, v){
+    const changed = v.note !== "" || v.status !== (t.status || "todo") || (v.due || "") !== (t.due || "");
+    if (!changed){ toast("برای بازگرداندن باید یادداشت بنویسی یا وضعیت/سررسید را تغییر بدهی"); return; }
+    const ok = await dbWrite(
+      sbMain.from("tasks").update({ decision_manager: null, decision_note: v.note || null, decision_answered_by: state.currentUser.uid, status: v.status, due: normDue(v.due), type: v.type }).eq("id", t.id),
+      { onSuccess: ()=>refetchTasks(board.id) }
+    );
+    if (ok){ delete state.drafts["dec:"+t.id]; toast("به صاحب کار بازگردانده شد ✓"); }
+  }
+  function renderDecisionBox(board, t){
+    const isManager = t.decision_manager === state.currentUser.uid;
+    const box = el("div", {class:"transfer-box"}, [
+      "⚖️ در انتظار تصمیم " + userLabel(t.decision_manager) + (t.owner_uid ? " — کارِ " + userLabel(t.owner_uid) : "")
+    ]);
+    if (!isManager) return box;
+    const form = el("div", {style:"display:flex; flex-direction:column; gap:6px; margin-top:8px;"});
+    const note = el("textarea", {rows:"2", placeholder:"پاسخ یا یادداشت مدیر...", style:"width:100%;"});
+    keepDraft(note, "dec:"+t.id);
+    const status = statusSelect(t.status, ()=>{});
+    const dueI = el("input", {type:"date"}); dueI.value = t.due || "";
+    const typeSel = el("select");
+    TYPES.filter(x => x.id !== "decision").forEach(x => typeSel.appendChild(el("option", {value:x.id}, ["نوع: " + x.label])));
+    const row = el("div", {style:"display:flex; flex-wrap:wrap; gap:6px;"}, [status, dueI, typeSel]);
+    const back = el("button", {class:"btn small", onclick:()=> returnDecision(board, t, { note: note.value.trim(), status: status.value, due: dueI.value, type: typeSel.value })}, ["بازگرداندن به صاحب کار"]);
+    form.appendChild(note); form.appendChild(row); form.appendChild(back);
+    box.appendChild(form);
+    return box;
+  }
+  function renderDecisionInbox(){
+    const mine = [];
+    Object.keys(state.tasksByBoard).forEach(bid => {
+      (state.tasksByBoard[bid] || []).forEach(t => { if (t.decision_manager === state.currentUser.uid) mine.push({bid, t}); });
+    });
+    if (!mine.length) return null;
+    const panel = el("div", {class:"panel", style:"border-color:var(--pending-line); background:var(--pending-bg);"});
+    panel.appendChild(el("p", {class:"hint", style:"font-weight:700; color:var(--pending-line);"}, ["⚖️ منتظر تصمیم شما (" + mine.length + ")"]));
+    mine.forEach(({bid, t}) => {
+      const b = state.boards.find(x => x.id === bid);
+      panel.appendChild(el("button", {class:"btn small secondary", style:"display:block; margin:4px 0;", onclick:()=>{
+        state.activeTab = bid;
+        if (b && !b.market && t.owner_uid) state.subUserByBoard[bid] = t.owner_uid;
+        render();
+      }}, ["«" + t.title + "» — " + (b ? b.name : "") + (t.owner_uid ? " — " + userLabel(t.owner_uid) : "")]));
+    });
+    return panel;
   }
 
   function statusSelect(current, onChange){
@@ -886,7 +973,7 @@
   }
 
   function renderCard(board, t, showOwner){
-    const locked = !board.market && isLocked(t);
+    const locked = isLockedFor(board, t);
     const card = el("div", {class:"card" + (locked ? " pending-ack" : "")});
     card.appendChild(el("p", {class:"title"}, [t.title]));
 
@@ -895,6 +982,10 @@
     if (showOwner && t.owner_uid) metaRow.appendChild(el("span", {class:"chip"}, ["👤 " + userLabel(t.owner_uid)]));
     metaRow.appendChild(el("span", {class:"chip " + typeCls(t.type)}, [typeLabel(t.type || "normal")]));
     card.appendChild(metaRow);
+
+    if (!locked && t.decision_note){
+      card.appendChild(el("div", {class:"transfer-box"}, ["✅ پاسخ " + userLabel(t.decision_answered_by) + ": " + t.decision_note]));
+    }
 
     if (locked){
       const lb = renderLockBox(board, t);
@@ -906,7 +997,7 @@
     const fields = el("div", {class:"fields"});
     const { wrap: dueWrap } = dueFieldWithJalali(t.due, (e)=> updateTask(board.id, t.id, {due:e.target.value}), "f-due");
     fields.appendChild(dueWrap);
-    fields.appendChild(typeSelect(t.type, (e)=> updateTask(board.id, t.id, {type:e.target.value})));
+    fields.appendChild(typeSelect(t.type, (e)=> changeType(board, t, e.target)));
     card.appendChild(fields);
 
     const notes = el("textarea", {placeholder:"یادداشت..."}); notes.value = t.notes || "";
@@ -940,7 +1031,7 @@
     if (!tasks.length){ table.appendChild(el("tr", null, [el("td", {colspan, class:"empty"}, ["هنوز کاری ثبت نشده."])])); }
 
     tasks.forEach(t => {
-      const locked = !board.market && isLocked(t);
+      const locked = isLockedFor(board, t);
       const tr = el("tr", {class: (isOverdue(t.due, t.status) ? "row-overdue" : "") + (locked ? " pending-ack" : "")});
 
       const titleInput = el("input", {type:"text"}); titleInput.value = t.title || "";
@@ -982,7 +1073,7 @@
       tr.appendChild(el("td", null, [titleNode]));
       tr.appendChild(el("td", {class:"due-cell"}, [dueWrap]));
       if (showOwner) tr.appendChild(el("td", null, [userLabel(t.owner_uid)]));
-      tr.appendChild(el("td", null, [typeSelect(t.type, (e)=>updateTask(board.id,t.id,{type:e.target.value}))]));
+      tr.appendChild(el("td", null, [typeSelect(t.type, (e)=> changeType(board, t, e.target))]));
       tr.appendChild(el("td", null, [statusSelect(t.status, (e)=> updateTask(board.id, t.id, {status: e.target.value}))]));
       tr.appendChild(el("td", null, [notesNode]));
       tr.appendChild(el("td", null, lastCellBtns));
