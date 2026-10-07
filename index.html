@@ -143,6 +143,15 @@
   .card .fields .f-type{ flex:1; min-width:110px; }
   .card textarea{ width:100%; border:1px solid var(--line); border-radius:6px; background:var(--bg); color:var(--ink); font-family:inherit; font-size:12.5px; padding:6px 8px; resize:vertical; min-height:34px; margin-bottom:8px; }
   .card .row{ display:flex; gap:6px; align-items:center; justify-content:space-between; }
+  .col{ border-width:1.5px; }
+  .card-wrap{ margin-bottom:12px; }
+  .card-wrap .card{ margin-bottom:6px; }
+  .stage-strip{ display:flex; align-items:center; justify-content:space-between; gap:6px; }
+  .stage-icons{ display:flex; gap:2px; align-items:center; }
+  .stage-btn{ display:inline-flex; align-items:center; gap:4px; white-space:nowrap; }
+  .stage-pill-row{ display:flex; align-items:center; gap:4px; white-space:nowrap; }
+  .stage-pill{ font-size:12px; border:1px solid; border-radius:999px; padding:3px 10px; min-width:96px; text-align:center; }
+  .stage-arrow{ font-size:16px; padding:2px 6px; }
   .card select.status-sel{ flex:1; padding:5px 6px; border-radius:6px; border:1px solid var(--line); background:var(--bg); color:var(--ink); font-family:inherit; font-size:12.5px; }
   .icon-btn{ border:none; background:transparent; color:var(--ink-dim); cursor:pointer; font-size:15px; padding:2px 4px; }
   .icon-btn:hover{ color:var(--danger); }
@@ -263,7 +272,7 @@
     </div>
   </div>
 
-  <footer>هر تغییری همین‌جا برای همه‌ی اعضا ذخیره و همگام می‌شود.<br><span style="opacity:.5;">نسخه: BUILD-2026-09-30-21-manager-decision</span></footer>
+  <footer>هر تغییری همین‌جا برای همه‌ی اعضا ذخیره و همگام می‌شود.<br><span style="opacity:.5;">نسخه: BUILD-2026-10-01-22-stage-arrows</span></footer>
 </div>
 <div class="toast" id="toast"></div>
 
@@ -940,6 +949,32 @@
     return panel;
   }
 
+  // Moving a task between stages: arrows to the previous / next stage instead of a dropdown.
+  // The page is right-to-left, so "previous" sits on the right and "next" on the left.
+  function stageNeighbor(t, dir){
+    const i = STATUSES.findIndex(st => st.id === (t.status || "todo"));
+    return STATUSES[i + dir] || null;
+  }
+  function stageButton(board, t, target, which){
+    const arrow = el("span", null, [which === "prev" ? "→" : "←"]);
+    const label = el("span", null, [target.label]);
+    return el("button", {class:"btn small secondary stage-btn", title:"انتقال به «"+target.label+"»", onclick:()=> updateTask(board.id, t.id, {status: target.id})},
+      which === "prev" ? [arrow, label] : [label, arrow]);
+  }
+  function stagePill(board, t){
+    const cur = STATUSES.find(st => st.id === (t.status || "todo")) || STATUSES[0];
+    const prev = stageNeighbor(t, -1), next = stageNeighbor(t, +1);
+    const arrowBtn = (target, ch) => {
+      if (!target) return el("span", {class:"icon-btn stage-arrow", style:"visibility:hidden;"}, [ch]);
+      return el("button", {class:"icon-btn stage-arrow", title:"انتقال به «"+target.label+"»", onclick:()=> updateTask(board.id, t.id, {status: target.id})}, [ch]);
+    };
+    return el("div", {class:"stage-pill-row"}, [
+      arrowBtn(prev, "→"),
+      el("span", {class:"stage-pill", style:"background:var(--col-"+cur.cls+"-bg); border-color:var(--col-"+cur.cls+"-line);"}, [cur.label]),
+      arrowBtn(next, "←")
+    ]);
+  }
+
   function statusSelect(current, onChange){
     const sel = el("select", {onchange: onChange});
     STATUSES.forEach(st => {
@@ -1003,11 +1038,9 @@
     const notes = el("textarea", {placeholder:"یادداشت..."}); notes.value = t.notes || "";
     card.appendChild(withSaveButton(notes, v => updateTask(board.id, t.id, {notes: v}), "n:"+t.id));
 
-    const sel = statusSelect(t.status, (e)=> updateTask(board.id, t.id, {status: e.target.value}));
-    sel.className = "status-sel";
     const xferBtn = el("button", {class:"icon-btn", title:"ارسال به کاربر دیگر", onclick:()=>requestTransfer(board,t)}, ["🔁"]);
     const del = el("button", {class:"icon-btn", title:"حذف", onclick: ()=>{ if(confirm("این کار حذف شود؟")) deleteTask(board.id, t.id); }}, ["✕"]);
-    const rowBtns = [sel, xferBtn];
+    const rowBtns = [xferBtn];
     if (t.owner_uid === state.currentUser.uid){
       if (t.snooze_until && t.snooze_until >= todayStr()){
         rowBtns.push(el("button", {class:"icon-btn", title:"لغو به‌تعویق‌انداختن (یادآوری تا "+shortJalali(t.snooze_until)+" خاموش است)", onclick:()=>unsnoozeTask(board.id,t)}, ["😴"]));
@@ -1016,8 +1049,13 @@
       }
     }
     rowBtns.push(del);
-    card.appendChild(el("div", {class:"row"}, rowBtns));
-    return card;
+    const prev = stageNeighbor(t, -1), next = stageNeighbor(t, +1);
+    const strip = el("div", {class:"stage-strip"}, [
+      prev ? stageButton(board, t, prev, "prev") : el("span", null, []),
+      el("div", {class:"stage-icons"}, rowBtns),
+      next ? stageButton(board, t, next, "next") : el("span", null, [])
+    ]);
+    return el("div", {class:"card-wrap"}, [card, strip]);
   }
 
   function renderList(board, tasks, showOwner){
@@ -1074,7 +1112,7 @@
       tr.appendChild(el("td", {class:"due-cell"}, [dueWrap]));
       if (showOwner) tr.appendChild(el("td", null, [userLabel(t.owner_uid)]));
       tr.appendChild(el("td", null, [typeSelect(t.type, (e)=> changeType(board, t, e.target))]));
-      tr.appendChild(el("td", null, [statusSelect(t.status, (e)=> updateTask(board.id, t.id, {status: e.target.value}))]));
+      tr.appendChild(el("td", null, [stagePill(board, t)]));
       tr.appendChild(el("td", null, [notesNode]));
       tr.appendChild(el("td", null, lastCellBtns));
       table.appendChild(tr);
