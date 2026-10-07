@@ -195,6 +195,7 @@
   .weekly-snap{ background:var(--surface-2); border-radius:9px; padding:10px 12px; margin-bottom:18px; font-size:12.5px; }
   .weekly-snap b{ display:block; margin-bottom:6px; }
 
+  textarea.unsaved, input.unsaved{ border-color: var(--accent) !important; box-shadow: 0 0 0 1px var(--accent); }
   .toast{ position:fixed; bottom:20px; left:50%; transform:translateX(-50%); background:var(--ink); color:var(--bg); padding:10px 20px; border-radius:8px; font-size:13px; opacity:0; pointer-events:none; transition:opacity .25s; z-index:300; }
   .toast.show{ opacity:1; }
   footer{ text-align:center; color:var(--ink-dim); font-size:12px; margin-top:24px; }
@@ -247,7 +248,7 @@
     </div>
   </div>
 
-  <footer>هر تغییری همین‌جا برای همه‌ی اعضا ذخیره و همگام می‌شود.<br><span style="opacity:.5;">نسخه: BUILD-2026-09-22-15-percounts</span></footer>
+  <footer>هر تغییری همین‌جا برای همه‌ی اعضا ذخیره و همگام می‌شود.<br><span style="opacity:.5;">نسخه: BUILD-2026-09-29-18-drafts</span></footer>
 </div>
 <div class="toast" id="toast"></div>
 
@@ -307,7 +308,8 @@
     subscribedBoardIds: new Set(),
     dbReady: false,
     uiBusy: false,          // true while a multi-step action (e.g. creating a user) is in flight
-    activityRows: []
+    activityRows: [],
+    drafts: {}              // unsaved text typed into fields, kept across re-renders
   };
 
   // ============================================================
@@ -346,6 +348,29 @@
   function debounce(fn, ms){
     let timer;
     return function(...args){ clearTimeout(timer); timer = setTimeout(()=> fn.apply(this, args), ms); };
+  }
+
+  // Text fields are saved only when the person presses the "ثبت" button next to them —
+  // nothing is saved automatically while typing. Whatever is typed but not yet saved is kept
+  // as a draft (by key), so a screen refresh never throws the text away.
+  function withSaveButton(field, save, key){
+    const baseline = field.value;
+    if (key && state.drafts[key] !== undefined) field.value = state.drafts[key];
+    const markDirty = ()=> field.classList.toggle("unsaved", field.value !== baseline);
+    markDirty();
+    field.addEventListener("input", ()=>{
+      if (key){ if (field.value === baseline) delete state.drafts[key]; else state.drafts[key] = field.value; }
+      markDirty();
+    });
+    const wrap = el("div", {style:"display:flex; flex-direction:column; gap:4px; align-items:flex-start; width:100%;"});
+    const btn = el("button", {class:"btn small secondary", onclick: async ()=>{
+      btn.disabled = true;
+      try{ await save(field.value); if (key) delete state.drafts[key]; toast("ثبت شد ✓"); }
+      finally{ btn.disabled = false; }
+      field.blur(); // lets the screen refresh with the saved data
+    }}, ["ثبت"]);
+    wrap.appendChild(field); wrap.appendChild(btn);
+    return wrap;
   }
 
   function todayStr(){ const d=new Date(); return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`; }
@@ -856,8 +881,7 @@
     card.appendChild(fields);
 
     const notes = el("textarea", {placeholder:"یادداشت..."}); notes.value = t.notes || "";
-    notes.addEventListener("input", debounce(()=> updateTask(board.id, t.id, {notes: notes.value}), 500));
-    card.appendChild(notes);
+    card.appendChild(withSaveButton(notes, v => updateTask(board.id, t.id, {notes: v}), "n:"+t.id));
 
     const sel = statusSelect(t.status, (e)=> updateTask(board.id, t.id, {status: e.target.value}));
     sel.className = "status-sel";
@@ -891,7 +915,8 @@
       const tr = el("tr", {class: (isOverdue(t.due, t.status) ? "row-overdue" : "") + (locked ? " pending-ack" : "")});
 
       const titleInput = el("input", {type:"text"}); titleInput.value = t.title || "";
-      if (!locked) titleInput.addEventListener("input", debounce(()=>updateTask(board.id,t.id,{title:titleInput.value}), 500));
+      let titleNode = titleInput;
+      if (!locked) titleNode = withSaveButton(titleInput, v => updateTask(board.id,t.id,{title:v}), "t:"+t.id);
       else titleInput.setAttribute("readonly","readonly");
 
       if (locked){
@@ -911,7 +936,7 @@
       const { wrap: dueWrap } = dueFieldWithJalali(t.due, (e)=>updateTask(board.id,t.id,{due:e.target.value}));
 
       const notesInput = el("textarea", {rows:"1"}); notesInput.value = t.notes || "";
-      notesInput.addEventListener("input", debounce(()=>updateTask(board.id,t.id,{notes:notesInput.value}), 500));
+      const notesNode = withSaveButton(notesInput, v => updateTask(board.id,t.id,{notes:v}), "n:"+t.id);
 
       const xferBtn = el("button", {class:"icon-btn", title:"ارسال به کاربر دیگر", onclick:()=>requestTransfer(board,t)}, ["🔁"]);
       const del = el("button", {class:"icon-btn", title:"حذف", onclick: ()=>{ if(confirm("این کار حذف شود؟")) deleteTask(board.id, t.id); }}, ["✕"]);
@@ -925,12 +950,12 @@
       }
       lastCellBtns.push(del);
 
-      tr.appendChild(el("td", null, [titleInput]));
+      tr.appendChild(el("td", null, [titleNode]));
       tr.appendChild(el("td", {class:"due-cell"}, [dueWrap]));
       if (showOwner) tr.appendChild(el("td", null, [userLabel(t.owner_uid)]));
       tr.appendChild(el("td", null, [typeSelect(t.type, (e)=>updateTask(board.id,t.id,{type:e.target.value}))]));
       tr.appendChild(el("td", null, [statusSelect(t.status, (e)=> updateTask(board.id, t.id, {status: e.target.value}))]));
-      tr.appendChild(el("td", null, [notesInput]));
+      tr.appendChild(el("td", null, [notesNode]));
       tr.appendChild(el("td", null, lastCellBtns));
       table.appendChild(tr);
     });
@@ -972,11 +997,11 @@
         ]));
         WEEKLY_FIELDS.forEach(f => {
           const ta = el("textarea", {rows:"2"}); ta.value = r[f.key] || "";
-          ta.addEventListener("input", debounce(async ()=>{
-            await dbWrite(sbMain.from("weekly").update({[f.key]: ta.value}).eq("id", r.id), { onSuccess: refetchWeekly });
-          }, 500));
+          const taNode = withSaveButton(ta, async v => {
+            await dbWrite(sbMain.from("weekly").update({[f.key]: v}).eq("id", r.id), { onSuccess: refetchWeekly });
+          }, "w:"+r.id+":"+f.key);
           card.appendChild(el("div", {class:"hint", style:"font-weight:700; margin:8px 0 3px;"}, [f.label]));
-          card.appendChild(ta);
+          card.appendChild(taNode);
         });
         panel.appendChild(card);
       });
@@ -994,10 +1019,10 @@
       tr.appendChild(el("td", {class:"datecell"}, [r.date || ""]));
       WEEKLY_FIELDS.forEach(f => {
         const ta = el("textarea", {rows:"1"}); ta.value = r[f.key] || "";
-        ta.addEventListener("input", debounce(async ()=>{
-          await dbWrite(sbMain.from("weekly").update({[f.key]: ta.value}).eq("id", r.id), { onSuccess: refetchWeekly });
-        }, 500));
-        tr.appendChild(el("td", null, [ta]));
+        const taNode = withSaveButton(ta, async v => {
+          await dbWrite(sbMain.from("weekly").update({[f.key]: v}).eq("id", r.id), { onSuccess: refetchWeekly });
+        }, "w:"+r.id+":"+f.key);
+        tr.appendChild(el("td", null, [taNode]));
       });
       const del = el("button", {class:"icon-btn", title:"حذف این هفته", onclick: async ()=>{
         if (!confirm("ردیف این هفته حذف شود؟")) return;
@@ -1379,7 +1404,7 @@
 
   function resetState(){
     state.currentUser = null; state.currentUserDoc = null; state.dbReady = false; started = false;
-    state.boards = []; state.tasksByBoard = {}; state.weeklyRows = []; state.allUsers = []; state.activityRows = [];
+    state.boards = []; state.tasksByBoard = {}; state.weeklyRows = []; state.allUsers = []; state.activityRows = []; state.drafts = {};
     state.activeTab = null; state.subscribedBoardIds = new Set();
     sbMain.removeAllChannels();
   }
