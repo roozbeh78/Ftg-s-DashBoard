@@ -248,7 +248,7 @@
     </div>
   </div>
 
-  <footer>هر تغییری همین‌جا برای همه‌ی اعضا ذخیره و همگام می‌شود.<br><span style="opacity:.5;">نسخه: BUILD-2026-09-29-18-drafts</span></footer>
+  <footer>هر تغییری همین‌جا برای همه‌ی اعضا ذخیره و همگام می‌شود.<br><span style="opacity:.5;">نسخه: BUILD-2026-09-29-19-drafts-everywhere</span></footer>
 </div>
 <div class="toast" id="toast"></div>
 
@@ -372,6 +372,16 @@
     wrap.appendChild(field); wrap.appendChild(btn);
     return wrap;
   }
+
+  // For any plain field (no save button): remember what was typed so a screen refresh
+  // never wipes it. Call clearDrafts([...keys]) once the form has actually been submitted.
+  function keepDraft(field, key){
+    if (state.drafts[key] !== undefined) field.value = state.drafts[key];
+    const remember = ()=>{ state.drafts[key] = field.value; };
+    field.addEventListener("input", remember);
+    field.addEventListener("change", remember);
+  }
+  function clearDrafts(keys){ keys.forEach(k => { delete state.drafts[k]; }); }
 
   function todayStr(){ const d=new Date(); return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`; }
   function isOverdue(due, status){ if (!due || status === "done") return false; return due < todayStr(); }
@@ -720,16 +730,20 @@
 
   function renderAddForm(board, ownerUid){
     const boardId = board.id;
+    const dk = "add:"+boardId+":"+(ownerUid||"")+":";
     const title = el("input", {type:"text", class:"f-title", placeholder:"عنوان کار جدید..."});
-    const { wrap: dueWrap, input: due } = dueFieldWithJalali(todayStr(), ()=>{}, "f-due");
+    keepDraft(title, dk+"title");
+    const { wrap: dueWrap, input: due } = dueFieldWithJalali(state.drafts[dk+"due"] || todayStr(), ()=>{}, "f-due");
+    keepDraft(due, dk+"due");
     const typeSel = el("select", {class:"f-type"});
     TYPES.forEach(t => typeSel.appendChild(el("option", {value:t.id}, [t.label])));
+    keepDraft(typeSel, dk+"type");
     const addBtn = el("button", {class:"btn", onclick: async ()=>{
       const v = title.value.trim();
       if (!v) return;
       const needsAck = !board.market && ownerUid && ownerUid !== state.currentUser.uid;
       const ok = await addTask(boardId, { title:v, due:normDue(due.value), owner_uid: board.market ? null : ownerUid, type:typeSel.value||"normal", owner_confirmed: !needsAck });
-      if (ok){ title.value=""; due.value=todayStr(); due.dispatchEvent(new Event("change")); typeSel.value="normal"; title.focus(); }
+      if (ok){ clearDrafts([dk+"title", dk+"due", dk+"type"]); title.value=""; due.value=todayStr(); due.dispatchEvent(new Event("change")); typeSel.value="normal"; title.focus(); }
     }}, ["افزودن"]);
     title.addEventListener("keydown", (e)=>{ if (e.key === "Enter") addBtn.click(); });
     return el("div", {class:"add-form"}, [title, dueWrap, typeSel, addBtn]);
@@ -1101,6 +1115,7 @@
     const emailIn = el("input", {type:"email", class:"f-title", placeholder:"ایمیل کاربر جدید"});
     const passIn = el("input", {type:"password", class:"f-due", placeholder:"رمز عبور موقت"});
     const nameIn = el("input", {type:"text", class:"f-type", placeholder:"نام نمایشی (اختیاری)"});
+    keepDraft(emailIn, "adduser:email"); keepDraft(passIn, "adduser:pass"); keepDraft(nameIn, "adduser:name");
     const addBtn = el("button", {class:"btn", onclick: async ()=>{
       const email = emailIn.value.trim(), pass = passIn.value;
       if (!email || pass.length < 6){ toast("ایمیل معتبر و رمز حداقل ۶ کاراکتری لازم است"); return; }
@@ -1108,7 +1123,7 @@
       try{
         await createUser(email, pass, nameIn.value.trim());
         toast("کاربر ساخته شد");
-        emailIn.value=""; passIn.value=""; nameIn.value="";
+        clearDrafts(["adduser:email","adduser:pass","adduser:name"]); emailIn.value=""; passIn.value=""; nameIn.value="";
       }catch(e){
         console.error("createUser failed:", e);
         const detail = [e && e.message, e && e.code, e && e.details, e && e.hint].filter(Boolean).join(" | ");
